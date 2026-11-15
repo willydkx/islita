@@ -54,12 +54,12 @@ static const float CW_IDLE = 276, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
-enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET };
+enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES };
 enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV };
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -2320,6 +2320,71 @@ static void drawSearch(float x, float y, float w, float h) {
     }
 }
 
+
+// ---------------------------------------------------------------- menú de clic derecho de una app (como el de la barra de tareas)
+enum { CA_NEW, CA_PIN, CA_UNPIN, CA_CLOSE };
+static int ctxTile = -1; static D2D1_RECT_F ctxAnchor{}; static std::vector<int> ctxActs;
+static std::wstring tileLaunchTarget(const Tile& t, std::wstring* args) {
+    if (t.pin >= 0) { if (args) *args = apps[t.pin].args; return apps[t.pin].target; }
+    const RunApp& r = running[t.run];
+    return r.aumid.empty() ? r.exe : L"shell:AppsFolder\\" + r.aumid;
+}
+static void drawCtx(float ox, float oy) {
+    if (ctxTile < 0 || ctxTile >= (int)tiles.size()) return;
+    const Tile& t = tiles[ctxTile];
+    ctxActs.clear();
+    ctxActs.push_back(CA_NEW);
+    if (t.pin >= 0) ctxActs.push_back(CA_UNPIN); else if ((int)apps.size() < MAX_APPS) ctxActs.push_back(CA_PIN);
+    if (t.run >= 0) ctxActs.push_back(CA_CLOSE);
+    const float W = 196, RH = 30, HD = 30, P = 5;
+    float h = HD + ctxActs.size() * RH + P;
+    float x = std::max(ox + 12, ctxAnchor.left - W - 6), y = std::clamp(ctxAnchor.top - 6, oy + 46, oy + EH - 10 - h);
+    float a = easeOut(tw(20, 1.f, 22)), ga = gA; gA = ga * a;
+    float sc = 0.96f + 0.04f * a;
+    D2D1_MATRIX_3X2_F base; rt->GetTransform(&base);
+    float cx = x + W, cy = y;  // crece desde la esquina más cercana a la app
+    D2D1_MATRIX_3X2_F m{sc, 0, 0, sc, cx - sc * cx, cy - sc * cy};
+    D2D1_MATRIX_3X2_F mb = mmul(m, base); rt->SetTransform(&mb);
+    col(0, 0, 0, 0.35f); fillRR(x - 1, y + 2, W + 2, h + 2, 13);  // sombra
+    col(0.165f, 0.165f, 0.175f); fillRR(x, y, W, h, 12);
+    col(1, 1, 1, 0.1f); D2D1_ROUNDED_RECT rr{{x, y, x + W, y + h}, 12, 12}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+    if (ID2D1Bitmap* b = tileIcon(t)) { D2D1_RECT_F d{x + 12, y + 7, x + 28, y + 23}; rt->DrawBitmap(b, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); }
+    col(1, 1, 1, 0.6f); text(tileName(t), fSmall, x + 34, y + 5, W - 46, 20);
+    col(1, 1, 1, 0.08f); fillRR(x + 8, y + HD - 1, W - 16, 1, 0.5f);
+    int nw = t.run >= 0 ? (int)running[t.run].wins.size() : 0;
+    for (size_t i = 0; i < ctxActs.size(); i++) {
+        int id = H_CTX + (int)i, act = ctxActs[i];
+        float ry = y + HD + 2 + i * RH;
+        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, W - 10, RH - 2, 8);
+        const wchar_t* g = act == CA_NEW ? L"" : act == CA_PIN ? L"" : act == CA_UNPIN ? L"" : L"";
+        std::wstring l = act == CA_NEW ? L"Abrir nueva ventana" : act == CA_PIN ? L"Añadir a los atajos" : act == CA_UNPIN ? L"Quitar de los atajos"
+                       : nw > 1 ? L"Cerrar todas las ventanas (" + std::to_wstring(nw) + L")" : L"Cerrar ventana";
+        D2D1_COLOR_F c = act == CA_CLOSE ? RED : D2D1_COLOR_F{1, 1, 1, 0.9f};
+        colC(c, c.a); glyph(g, fIcon, x + 20, ry + (RH - 2) / 2, 20);
+        colC(c, c.a); text(l, fSmall, x + 36, ry, W - 46, RH - 2);
+        addHit(x + 5, ry, W - 10, RH - 2, id);
+    }
+    rt->SetTransform(&base);
+    gA = ga;
+    addHit(ox, oy, EW, EH, H_CTX_BG);  // un clic fuera del menú lo cierra
+}
+static void ctxRun(int item) {
+    if (ctxTile < 0 || ctxTile >= (int)tiles.size() || item < 0 || item >= (int)ctxActs.size()) { ctxTile = -1; return; }
+    Tile t = tiles[ctxTile]; int act = ctxActs[item];
+    ctxTile = -1;
+    if (act == CA_NEW) {
+        std::wstring args, tg = tileLaunchTarget(t, &args);
+        ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
+    } else if (act == CA_PIN) {
+        appendAtajo(tileName(t), tileLaunchTarget(t, nullptr)); loadApps(); loadIcons(); refreshTiles();
+    } else if (act == CA_UNPIN) {
+        removeAtajo(apps[t.pin].target); loadApps(); loadIcons(); refreshTiles();
+    } else if (act == CA_CLOSE && t.run >= 0) {
+        for (HWND w : running[t.run].wins) PostMessage(w, WM_SYSCOMMAND, SC_CLOSE, 0);  // como "Cerrar ventana" de la barra de tareas
+        SetTimer(gHwnd, T_TILES, 500, nullptr);  // las ventanas tardan un poco en cerrarse
+    }
+}
+
 // ---------------------------------------------------------------- pestaña Herramientas
 static void drawPicker(float x, float cy, float w) {
     static const wchar_t* LBL[3] = {L"h", L"min", L"s"};
@@ -2697,6 +2762,7 @@ static void drawView(int v, float ox, float y) {
         drawCalendar(x, y, 202, h, 1); x += 212;
         drawStats(x, y, 110, h, 2); x += 120;
         drawApps(x, y, ox + EW - 12 - x, h, 3);
+        if (ctxTile >= 0) { size_t n0 = hits.size(); drawCtx(ox, y - 44); std::rotate(hits.begin(), hits.begin() + n0, hits.end()); }
     } else if (v == V_TOOLS) {
         drawTimer(x, y, 250, h, 0); x += 260;
         drawNextEvent(x, y, 210, h, 1); x += 220;
@@ -2927,7 +2993,7 @@ static void setExpanded(bool e, int v = -1) {
         SetEvent(gWake);
     } else {
         gExpandedA = false;
-        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; collapsedTargets();
+        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; ctxTile = -1; collapsedTargets();
     }
     startAnim();
 }
@@ -3011,7 +3077,7 @@ static void ensureTopmost() {
         if (IntersectRect(&x, &r, &me)) { SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }
     }
 }
-static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (expanded && !sActive) { refreshTiles(); if (!animating) render(); } }
+static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (expanded && !sActive && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
 
 static void scheduleClock() {
     SYSTEMTIME st; GetLocalTime(&st);
@@ -3078,11 +3144,13 @@ static void click(int id) {
     else if (id > H_DAY && id < H_DAY + 32) selDay = id - H_DAY;
     else if (id == H_CBACK) selDay = 0;
     else if (id == H_COPEN || (id >= H_EVT && id < H_EVT + 100)) { openCalendarDay(calY, calM, selDay); return; }
+    else if (id == H_CTX_BG) ctxTile = -1;
+    else if (id >= H_CTX && id < H_CTX + 8) ctxRun(id - H_CTX);
     else if (id >= H_APP && id < H_APP + (int)tiles.size()) {
+        // la isla se queda abierta hasta que se aparte el ratón
         Tile t = tiles[id - H_APP];
         if (t.run >= 0) activateRun(running[t.run]);
-        else { App& a = apps[t.pin]; ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL); }
-        setExpanded(false); return;
+        else { App& a = apps[t.pin]; ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL); SetTimer(gHwnd, T_TILES, 1500, nullptr); }
     }
     else if (id == H_TM_MODE || id == H_TM_MODE + 1) { dismissAlert(); setPomo(id == H_TM_MODE + 1); }
     else if (id == H_TM_PLAY) {
@@ -3313,6 +3381,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             checkFullscreen();
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
+        else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();
         else if (wp == T_HOVER) { KillTimer(h, T_HOVER); if (hovered && !expanded) openFromPill(); }
@@ -3458,16 +3527,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
         if (expanded) {
             int id = hitAt(lp);
-            if (id >= H_APP && id < H_APP + (int)tiles.size()) {  // clic derecho: quita el atajo, o fija la app abierta
-                Tile t = tiles[id - H_APP];
-                if (t.pin >= 0) removeAtajo(apps[t.pin].target);
-                else if ((int)apps.size() < MAX_APPS) {
-                    const RunApp& r = running[t.run];
-                    appendAtajo(runName(r), r.aumid.empty() ? r.exe : L"shell:AppsFolder\\" + r.aumid);
-                }
-                loadApps(); loadIcons(); refreshTiles(); hoverId = H_NONE; render();
+            if (id >= H_APP && id < H_APP + (int)tiles.size()) {  // clic derecho en una app: su menú
+                ctxTile = id - H_APP; twSnap(20, 0);
+                for (auto& ht : hits) if (ht.id == id) { ctxAnchor = ht.r; break; }
+                hoverId = H_NONE; render();
                 return 0;
             }
+            if (ctxTile >= 0) { ctxTile = -1; render(); return 0; }
         }
         if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;

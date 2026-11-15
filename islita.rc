@@ -1,0 +1,33 @@
+// icono y datos de versión del ejecutable
+#include <winver.h>
+
+1 ICON "assets/islita.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "0C0A04B0"
+        BEGIN
+            VALUE "CompanyName", "willydkx"
+            VALUE "FileDescription", "islita"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "islita"
+            VALUE "LegalCopyright", "MIT, willydkx"
+            VALUE "OriginalFilename", "islita.exe"
+            VALUE "ProductName", "islita"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0C0A, 1200
+    END
+END

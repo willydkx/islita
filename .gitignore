@@ -1,0 +1,4 @@
+# el ejecutable se publica en Releases, no en el repositorio
+*.exe
+*.o
+*.obj

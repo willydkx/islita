@@ -6,6 +6,11 @@
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2ipdef.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
+#include <wlanapi.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
@@ -43,12 +48,12 @@
 // ---------------------------------------------------------------- constantes
 static const float EW = 720, EH = 264, ER = 40;   // panel abierto
 static const float CH = 34;                       // alto de la píldora
-static const float CW_IDLE = 236, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la píldora
+static const float CW_IDLE = 276, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la píldora
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
 enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET };
-enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS };
+enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV };
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
@@ -1585,6 +1590,118 @@ static void drawBattery(float x, float cy) {
     if (chg) colC(GREEN); else if (pct <= 0.2f) colC(RED); else col(1, 1, 1, 1);
     fillRR(x + 2, cy - 3.5f, 18 * clampf(pct, 0.06f, 1), 7, 1.6f);
 }
+
+// ---------------------------------------------------------------- wifi y volumen en la píldora (por avisos de Windows, sin sondear)
+static int netKind = 0, netBars = 0;  // netKind: 0 sin red, 1 wifi, 2 cable
+static HANDLE wlanH = nullptr;
+static std::atomic<int> wifiBarsSeen{-1};
+static int barsOf(ULONG q) { return q >= 75 ? 4 : q >= 50 ? 3 : q >= 25 ? 2 : 1; }
+// Windows avisa de cada escaneo y de cada cambio de señal: solo se despierta a la isla si cambia algo visible
+static void CALLBACK wlanNotify(PWLAN_NOTIFICATION_DATA d, PVOID) {
+    if (d->NotificationSource == WLAN_NOTIFICATION_SOURCE_MSM) {
+        if (d->NotificationCode == wlan_notification_msm_signal_quality_change && d->pData && d->dwDataSize >= sizeof(ULONG)) {
+            int b = barsOf(*(ULONG*)d->pData);
+            if (wifiBarsSeen.exchange(b) != b) PostMessage(gHwnd, WM_APP_NET, 0, 0);
+            return;
+        }
+        if (d->NotificationCode != wlan_notification_msm_connected && d->NotificationCode != wlan_notification_msm_disconnected) return;
+    } else if (d->NotificationSource == WLAN_NOTIFICATION_SOURCE_ACM) {
+        switch (d->NotificationCode) {
+        case wlan_notification_acm_connection_complete: case wlan_notification_acm_disconnected:
+        case wlan_notification_acm_interface_arrival: case wlan_notification_acm_interface_removal: break;
+        default: return;
+        }
+    }
+    PostMessage(gHwnd, WM_APP_NET, 0, 0);
+}
+static void CALLBACK ipChange(PVOID, PMIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE) { PostMessage(gHwnd, WM_APP_NET, 0, 0); }
+static bool refreshNet() {  // true si ha cambiado lo que se ve
+    int kind = 0, bars = 0;
+    PWLAN_INTERFACE_INFO_LIST l = nullptr;
+    if (wlanH && WlanEnumInterfaces(wlanH, nullptr, &l) == ERROR_SUCCESS) {
+        for (DWORD i = 0; i < l->dwNumberOfItems && !kind; i++) {
+            if (l->InterfaceInfo[i].isState != wlan_interface_state_connected) continue;
+            DWORD sz = 0; PWLAN_CONNECTION_ATTRIBUTES ca = nullptr; WLAN_OPCODE_VALUE_TYPE vt;
+            if (WlanQueryInterface(wlanH, &l->InterfaceInfo[i].InterfaceGuid, wlan_intf_opcode_current_connection, nullptr, &sz, (PVOID*)&ca, &vt) == ERROR_SUCCESS && ca) {
+                ULONG q = ca->wlanAssociationAttributes.wlanSignalQuality;
+                kind = 1; bars = barsOf(q); wifiBarsSeen = bars;
+                WlanFreeMemory(ca);
+            }
+        }
+        WlanFreeMemory(l);
+    }
+    if (!kind) {  // ¿cable? (un adaptador activo con puerta de enlace)
+        ULONG sz = 16384; std::vector<BYTE> buf(sz);
+        ULONG fl = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        ULONG r = GetAdaptersAddresses(AF_UNSPEC, fl, nullptr, (PIP_ADAPTER_ADDRESSES)buf.data(), &sz);
+        if (r == ERROR_BUFFER_OVERFLOW) { buf.resize(sz); r = GetAdaptersAddresses(AF_UNSPEC, fl, nullptr, (PIP_ADAPTER_ADDRESSES)buf.data(), &sz); }
+        if (r == NO_ERROR)
+            for (auto a = (PIP_ADAPTER_ADDRESSES)buf.data(); a; a = a->Next)
+                if (a->OperStatus == IfOperStatusUp && a->FirstGatewayAddress && a->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
+                    kind = a->IfType == IF_TYPE_IEEE80211 ? 1 : 2; bars = 4; break;
+                }
+    }
+    if (kind == netKind && bars == netBars) return false;
+    netKind = kind; netBars = bars; return true;
+}
+static void netInit() {
+    DWORD ver = 0;
+    if (WlanOpenHandle(2, nullptr, &ver, &wlanH) == ERROR_SUCCESS)
+        WlanRegisterNotification(wlanH, WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM, TRUE, wlanNotify, nullptr, nullptr, nullptr);
+    else wlanH = nullptr;
+    HANDLE nh = nullptr; NotifyIpInterfaceChange(AF_UNSPEC, ipChange, nullptr, FALSE, &nh);
+    refreshNet();
+}
+static std::atomic<float> volLvl{-1.f}; static std::atomic<bool> volMuted{false};
+struct VolCb : IAudioEndpointVolumeCallback {
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** pp) override {
+        if (r == IID_IUnknown || r == __uuidof(IAudioEndpointVolumeCallback)) { *pp = this; return S_OK; }
+        *pp = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA d) override {
+        volLvl = d->fMasterVolume; volMuted = d->bMuted != FALSE; PostMessage(gHwnd, WM_APP_VOL, 0, 0); return S_OK;
+    }
+};
+struct DevCb : IMMNotificationClient {
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** pp) override {
+        if (r == IID_IUnknown || r == __uuidof(IMMNotificationClient)) { *pp = this; return S_OK; }
+        *pp = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow f, ERole r, LPCWSTR) override {
+        if (f == eRender && r == eConsole) PostMessage(gHwnd, WM_APP_VOLDEV, 0, 0);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+};
+static VolCb volCb; static DevCb devCb;
+static IMMDeviceEnumerator* volEnum = nullptr; static IAudioEndpointVolume* volInd = nullptr;
+static void volIndInit() {  // altavoz predeterminado (se rehace si cambia, p. ej. al conectar auriculares)
+    if (volInd) { volInd->UnregisterControlChangeNotify(&volCb); SafeRelease(volInd); }
+    if (!volEnum) {
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&volEnum))) { volEnum = nullptr; return; }
+        volEnum->RegisterEndpointNotificationCallback(&devCb);
+    }
+    IMMDevice* d = nullptr;
+    if (SUCCEEDED(volEnum->GetDefaultAudioEndpoint(eRender, eConsole, &d))) { d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void**)&volInd); d->Release(); }
+    if (volInd) {
+        volInd->RegisterControlChangeNotify(&volCb);
+        float v = 0; BOOL m = FALSE; volInd->GetMasterVolumeLevelScalar(&v); volInd->GetMute(&m);
+        volLvl = v; volMuted = m != FALSE;
+    } else volLvl = -1.f;
+}
+static int volIcon() {  // 0 sin dispositivo, 1 silencio, 2..5 nivel
+    float v = volLvl; if (v < 0) return 0;
+    if (volMuted) return 1;
+    return v <= 0.001f ? 2 : v < 0.34f ? 3 : v < 0.67f ? 4 : 5;
+}
+
 static bool hasBattery() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100; }
 
 static void drawCollapsed(float px, float py, float pw, int mode) {
@@ -1637,7 +1754,18 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         }
     } else {
         col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
-        if (!shelf.empty()) { col(1, 1, 1, 0.55f); glyph(L"", fIcon, px + 78, cy); textN(std::to_wstring(shelf.size()), fTiny, px + 88, cy - 8, 24, 16); }
+        // wifi y volumen, como en la barra de tareas
+        float nx = px + 78, vx = px + 100;
+        if (netKind == 1) {
+            static const wchar_t* W[5] = {L"\uE701", L"\uE872", L"\uE873", L"\uE874", L"\uE701"};
+            col(1, 1, 1, 0.25f); glyph(L"\uE701", fIcon, nx, cy);
+            col(1, 1, 1, 0.85f); glyph(W[std::clamp(netBars, 1, 4)], fIcon, nx, cy);
+        } else if (netKind == 2) { col(1, 1, 1, 0.85f); glyph(L"\uE839", fIcon, nx, cy); }
+        else { col(1, 1, 1, 0.45f); glyph(L"\uF384", fIcon, nx, cy); }
+        static const wchar_t* V[6] = {L"", L"\uE74F", L"\uE992", L"\uE993", L"\uE994", L"\uE995"};
+        int vi = volIcon();
+        if (vi) { col(1, 1, 1, vi == 1 ? 0.5f : 0.85f); glyph(V[vi], fIcon, vx, cy); }
+        if (!shelf.empty()) { col(1, 1, 1, 0.55f); glyph(L"", fIcon, px + 124, cy); textN(std::to_wstring(shelf.size()), fTiny, px + 134, cy - 8, 24, 16); }
         std::wstring d = std::wstring(DOW[st.wDayOfWeek]) + L" " + std::to_wstring(st.wDay) + L" " + MON[st.wMonth - 1];
         float right = px + pw - 15;
         if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= 24 + 40; }
@@ -3065,6 +3193,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // se hizo clic en otra ventana mientras se buscaba: se cierra
         if (LOWORD(wp) == WA_INACTIVE && sActive) { endSearch(false); if (!hovered) setExpanded(false); else render(); }
         break;
+    case WM_APP_NET:
+        if (refreshNet() && !expanded && !animating) render();
+        return 0;
+    case WM_APP_VOL:
+        { static int lastVi = -1; int vi = volIcon(); if (vi != lastVi) { lastVi = vi; if (!expanded && !animating) render(); } }
+        return 0;
+    case WM_APP_VOLDEV:
+        volIndInit(); if (!expanded && !animating) render();
+        return 0;
     case WM_APP_APPS:
         if ((unsigned)wp == sGen && expanded) {
             { std::lock_guard<std::mutex> lk(gMx); sApps.swap(gAppsShared); }
@@ -3171,6 +3308,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
 
     CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER, IID_IDropTargetHelper, (void**)&dropHelper);
     RegisterDragDrop(gHwnd, &dropTarget);
+    netInit(); volIndInit(); render();
     RegisterPowerSettingNotification(gHwnd, &GUID_BATT, DEVICE_NOTIFY_WINDOW_HANDLE);
     RegisterPowerSettingNotification(gHwnd, &GUID_ACDC, DEVICE_NOTIFY_WINDOW_HANDLE);
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, winEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

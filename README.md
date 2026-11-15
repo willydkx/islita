@@ -12,7 +12,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 
 ## Qué hace
 
-**En reposo**, la píldora muestra la hora, la fecha y la batería. Cambia sola según lo que pase:
+**En reposo**, la píldora muestra la hora, el wifi y el volumen (como en la barra de tareas), la fecha y la batería. Cambia sola según lo que pase:
 
 - Si suena música: carátula, título y un ecualizador con el color de la carátula.
 - Si tienes un evento pronto: "Clase en 20 min".
@@ -61,7 +61,7 @@ Como el ejecutable no está firmado, Windows puede avisar con "Windows protegió
 **Requisitos:**
 
 - Windows 11, por las fuentes Segoe UI Variable y Segoe Fluent Icons. En Windows 10 funciona, pero con otra letra y sin algunos iconos.
-- La temperatura de la GPU solo sale con tarjetas NVIDIA. La de la CPU es la del sensor térmico de la placa, sin permisos de administrador.
+- La temperatura y el uso de la GPU se leen como en el Administrador de tareas (sale con las gráficas que lo informan, como NVIDIA). La de la CPU es la del sensor térmico de la placa, sin permisos de administrador.
 - El brillo solo funciona con la pantalla interna de un portátil.
 
 ## Configuración
@@ -94,7 +94,8 @@ Esa dirección da acceso de lectura a tu calendario, así que no la compartas. i
 
 - El panel solo se redibuja cuando cambia algo; en reposo, una vez por minuto para la hora.
 - El hilo de fondo va en modo eficiencia de Windows (EcoQoS) y con prioridad mínima.
-- Los sensores, el volumen y el brillo solo se activan con el panel abierto.
+- Los sensores, el control de volumen y el brillo solo se activan con el panel abierto.
+- El wifi y el volumen de la píldora se actualizan por avisos de Windows, sin consultar cada poco: solo se redibuja si cambian las barras, la conexión o el icono del volumen.
 - Las animaciones van al ritmo de la pantalla (máximo unos 75 fotogramas por segundo).
 
 ## Compilar

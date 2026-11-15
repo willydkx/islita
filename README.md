@@ -26,7 +26,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente.
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
-  - Atajos a tus aplicaciones.
+  - Atajos a tus aplicaciones (hasta 6). El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.
@@ -35,7 +35,13 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
   - Arrastra archivos encima de la isla y quedan guardados para soltarlos después en otra carpeta o en una web.
   - Al sacarlos se copian; el original nunca se mueve.
 
-En la cabecera hay un botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
+En la cabecera hay un botón con el **logo de Windows** que abre el buscador de aplicaciones:
+
+- Busca entre todas las apps del menú Inicio (las de escritorio y las de la Store) mientras escribes. No hace falta poner tildes, y vale con las iniciales ("vsc" encuentra Visual Studio Code).
+- Clic o **Enter** para abrirla. Flechas para moverte, **Esc** para borrar o salir.
+- El **+** de cada resultado (o **Ctrl+Enter**) la añade a los atajos de Inicio; si ya está, sale un check y al pulsarlo se quita.
+
+Al lado está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
 
 - Iniciar con Windows y abrir al pasar el ratón.
 - Ocultar en pantalla completa y modo rayita.

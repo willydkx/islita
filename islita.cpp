@@ -47,11 +47,12 @@ static const float CW_IDLE = 236, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
-enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK };
-enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL };
+enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET };
+enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS };
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
-       H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650 };
+       H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -633,7 +634,7 @@ static ID2D1SolidColorBrush* br;
 static ID2D1StrokeStyle* roundStroke;
 static ID2D1StrokeStyle* dashStroke;
 static IDWriteTypography* tnum;
-static IDWriteTextFormat *fTime, *fSmall, *fTitle, *fBody, *fCalHead, *fCal, *fCalB, *fRing, *fTiny, *fApp, *fGlyph, *fIcon, *fIconL, *fBig, *fMid, *fTab;
+static IDWriteTextFormat *fTime, *fSmall, *fTitle, *fBody, *fCalHead, *fCal, *fCalB, *fRing, *fTiny, *fApp, *fGlyph, *fIcon, *fIconL, *fBig, *fMid, *fTab, *fSearch;
 
 static HDC memDC; static HBITMAP dib, oldBmp; static int dibW = 0, dibH = 0;
 static float scale = 1; static UINT dpi = 96;
@@ -646,6 +647,14 @@ static ID2D1Bitmap *artBmp, *artSBmp; static unsigned artVerUI = ~0u;
 struct App { std::wstring name, target, icon, args; ID2D1Bitmap* bmp = nullptr; };
 static std::vector<App> apps; static bool iconsLoaded = false; static FILETIME appsStamp{};
 static std::wstring cfgDir, appsFile;
+// buscador de aplicaciones (botón con el logo de Windows): solo vive mientras está abierto
+struct SApp { std::wstring name, id, key, ini, path; };  // id = nombre de análisis en shell:AppsFolder; path = programa al que apunta (si se sabe)
+static std::vector<SApp> gAppsShared, sApps; static std::vector<int> sRes;
+static std::wstring sQ, sMsg; static ULONGLONG sMsgAt = 0;
+static bool sActive = false, sLoaded = false, sCaret = true; static int sSel = 0, sScroll = 0; static unsigned sGen = 0;
+static HWND sPrevFg = nullptr;
+static std::map<std::wstring, ID2D1Bitmap*> sIcons;
+static void freeSearchIcons() { for (auto& p : sIcons) if (p.second) p.second->Release(); sIcons.clear(); }
 
 static std::vector<CalEvent> events;  // copia de la UI
 static int selDay = 0;                // 0 = vista de mes; si no, día abierto en la agenda
@@ -682,7 +691,7 @@ static int pick[3] = {0, 5, 0}; static float pickT[3] = {0, 5, 0}; static float 
 static int dragKind = 0, dragCol = -1; static float dragY0 = 0, dragPos0 = 0, dragLastY = 0, dragVel = 0; static ULONGLONG dragLastT = 0; static bool dragMoved = false;
 static D2D1_RECT_F briRect;
 // vistas del panel
-enum { V_HOME, V_TOOLS, V_SHELF, V_SET };
+enum { V_HOME, V_TOOLS, V_SHELF, V_SET, V_SEARCH };
 // bandeja de archivos (se guardan rutas, no copias)
 struct ShelfItem { std::wstring path, name; ID2D1Bitmap* bmp = nullptr; bool tried = false; };
 static std::vector<ShelfItem> shelf; static std::wstring shelfFile;
@@ -898,12 +907,14 @@ static ID2D1Bitmap* bitmapFromIcon(HICON hi, UINT px, bool checkJumbo) {
     SafeRelease(sc); SafeRelease(cv); wb->Release();
     return out;
 }
+static ID2D1Bitmap* thumbFor(const std::wstring& path, UINT px, int flags = SIIGBF_BIGGERSIZEOK);
 static void loadIcons() {
     if (iconsLoaded) return;
     iconsLoaded = true;
     UINT px = (UINT)lroundf(36 * scale * 1.1f);
     for (auto& a : apps) {
         std::wstring src = a.icon.empty() ? a.target : a.icon;
+        if (!_wcsnicmp(src.c_str(), L"shell:", 6)) { a.bmp = thumbFor(src, px, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK); continue; }  // apps del menú Inicio
         if (src.find(L'\\') == std::wstring::npos) { wchar_t full[MAX_PATH]; if (SearchPathW(nullptr, src.c_str(), nullptr, MAX_PATH, full, nullptr)) src = full; }
         if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
         HICON h = iconFor(src, SHIL_JUMBO);
@@ -939,11 +950,11 @@ static void loadShelf() {
     }
 }
 // miniatura del explorador (fotos y PDF con vista previa; el resto, su icono)
-static ID2D1Bitmap* thumbFor(const std::wstring& path, UINT px) {
+static ID2D1Bitmap* thumbFor(const std::wstring& path, UINT px, int flags) {
     IShellItemImageFactory* f = nullptr;
     if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&f)))) return nullptr;
     HBITMAP hb = nullptr; SIZE sz{(LONG)px, (LONG)px};
-    f->GetImage(sz, SIIGBF_BIGGERSIZEOK, &hb); f->Release();
+    f->GetImage(sz, (SIIGBF)flags, &hb); f->Release();
     if (!hb) return nullptr;
     // las fotos suelen venir con alfa a 0: en ese caso ignorar el alfa
     bool hasAlpha = false; DIBSECTION ds{};
@@ -1105,6 +1116,175 @@ static std::wstring fmtSW(ULONGLONG ms) {
     return b;
 }
 
+// ---------------------------------------------------------------- buscador de aplicaciones (como el menú Inicio)
+static const GUID FOLDERID_AppsFolder_ = {0x1e87508d, 0x89c2, 0x42f0, {0x8a, 0x7e, 0x64, 0x5a, 0x0f, 0x50, 0xca, 0x58}};
+static const GUID BHID_EnumItems_ = {0x94f60519, 0x2850, 0x4924, {0xaa, 0x5a, 0xd1, 0x5e, 0x84, 0x86, 0x80, 0x39}};
+static const wchar_t* APPS_PREFIX = L"shell:AppsFolder\\";
+static const PROPERTYKEY PKEY_Link_TargetParsingPath_ = {{0xB9B4B3FC, 0x2B51, 0x4A42, {0xB5, 0xD8, 0x32, 0x41, 0x46, 0xAF, 0xCF, 0x25}}, 2};
+// minúsculas y sin tildes, para que "camara" encuentre "Cámara"
+static std::wstring foldKey(const std::wstring& s) {
+    if (s.empty()) return s;
+    std::wstring d = s;
+    int n = FoldStringW(MAP_COMPOSITE, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n > 0) { d.assign(n, 0); FoldStringW(MAP_COMPOSITE, s.c_str(), (int)s.size(), &d[0], n); }
+    std::wstring o; o.reserve(d.size());
+    for (wchar_t c : d) if (c < 0x300 || c > 0x36F) o += c;
+    if (!o.empty()) CharLowerBuffW(&o[0], (DWORD)o.size());
+    return o;
+}
+static bool isSep(wchar_t c) { return c == L' ' || c == L'-' || c == L'_' || c == L'.' || c == L'(' || c == L'/'; }
+// lista de apps del menú Inicio (de escritorio y de la Store), en un hilo aparte
+static void enumApps(unsigned gen) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::vector<SApp> out;
+    IShellItem* root = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_AppsFolder_, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&root)))) {
+        IEnumShellItems* en = nullptr;
+        if (SUCCEEDED(root->BindToHandler(nullptr, BHID_EnumItems_, IID_PPV_ARGS(&en)))) {
+            IShellItem* it = nullptr; ULONG got = 0;
+            while (en->Next(1, &it, &got) == S_OK && it) {
+                LPWSTR nm = nullptr, pid = nullptr;
+                if (SUCCEEDED(it->GetDisplayName(SIGDN_NORMALDISPLAY, &nm)) && SUCCEEDED(it->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &pid)) && nm && pid && *nm) {
+                    SApp a; a.name = nm; a.id = pid; a.key = foldKey(a.name);
+                    // ruta del programa, para reconocer los atajos que ya apuntan a él
+                    IShellItem2* i2 = nullptr; LPWSTR tp = nullptr;
+                    if (SUCCEEDED(it->QueryInterface(IID_PPV_ARGS(&i2)))) {
+                        if (SUCCEEDED(i2->GetString(PKEY_Link_TargetParsingPath_, &tp)) && tp) { a.path = tp; CoTaskMemFree(tp); }
+                        i2->Release();
+                    }
+                    if (a.path.empty() && a.id.size() > 38 && a.id[0] == L'{' && a.id[37] == L'}') {  // {carpeta conocida}\resto
+                        GUID g; LPWSTR kf = nullptr;
+                        if (SUCCEEDED(CLSIDFromString(a.id.substr(0, 38).c_str(), &g)) && SUCCEEDED(SHGetKnownFolderPath(g, 0, nullptr, &kf)) && kf)
+                            a.path = std::wstring(kf) + a.id.substr(38);
+                        CoTaskMemFree(kf);
+                    }
+                    bool junk = a.key.find(L"uninstall") != std::wstring::npos || a.key.find(L"desinstal") != std::wstring::npos;
+                    if (!junk) out.push_back(std::move(a));
+                }
+                CoTaskMemFree(nm); CoTaskMemFree(pid); it->Release(); it = nullptr;
+            }
+            en->Release();
+        }
+        root->Release();
+    }
+    CoUninitialize();
+    std::sort(out.begin(), out.end(), [](const SApp& a, const SApp& b) { return a.key < b.key; });
+    out.erase(std::unique(out.begin(), out.end(), [](const SApp& a, const SApp& b) { return a.key == b.key; }), out.end());
+    for (auto& a : out)  // iniciales: "vsc" encuentra "Visual Studio Code"
+        for (size_t i = 0; i < a.key.size(); i++) if (!isSep(a.key[i]) && (i == 0 || isSep(a.key[i - 1]))) a.ini += a.key[i];
+    { std::lock_guard<std::mutex> lk(gMx); gAppsShared.swap(out); }
+    PostMessage(gHwnd, WM_APP_APPS, gen, 0);
+}
+static const int S_COLS = 2, S_ROWS = 4;
+static int sMaxScroll() { return std::max(0, ((int)sRes.size() + S_COLS - 1) / S_COLS - S_ROWS); }
+static void sEnsureVisible() {
+    int r = sSel / S_COLS;
+    if (r < sScroll) sScroll = r;
+    if (r >= sScroll + S_ROWS) sScroll = r - S_ROWS + 1;
+    sScroll = std::clamp(sScroll, 0, sMaxScroll());
+}
+static void sFilter() {
+    sRes.clear(); sSel = 0; sScroll = 0;
+    std::wstring q = foldKey(trim(sQ));
+    if (q.empty()) { for (int i = 0; i < (int)sApps.size(); i++) sRes.push_back(i); return; }
+    std::vector<std::pair<int, int>> sc;
+    for (int i = 0; i < (int)sApps.size(); i++) {
+        const SApp& a = sApps[i]; int best = -1;
+        // 0 empieza por, 1 empieza una palabra, 2 está dentro, 3 iniciales
+        for (size_t p = a.key.find(q); p != std::wstring::npos && best != 0; p = a.key.find(q, p + 1)) {
+            int s = p == 0 ? 0 : isSep(a.key[p - 1]) ? 1 : 2;
+            if (best < 0 || s < best) best = s;
+        }
+        if (best < 0 && q.size() >= 2 && a.ini.compare(0, q.size(), q) == 0) best = 3;
+        if (best >= 0) sc.push_back({best, i});
+    }
+    std::stable_sort(sc.begin(), sc.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return sApps[a.second].name.size() < sApps[b.second].name.size();
+    });
+    for (auto& p : sc) sRes.push_back(p.second);
+}
+// atajo que ya abre esta app (por shell:AppsFolder o por la ruta del programa); vacío si no hay
+static std::wstring sPinnedTarget(const SApp& s) {
+    std::wstring t = APPS_PREFIX + s.id;
+    for (auto& a : apps)
+        if (!_wcsicmp(a.target.c_str(), t.c_str()) || (!s.path.empty() && !_wcsicmp(a.target.c_str(), s.path.c_str()))) return a.target;
+    return L"";
+}
+static bool sPinned(const SApp& s) { return !sPinnedTarget(s).empty(); }
+static std::wstring fromUtf8(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, 0); if (n) MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+static void appendAtajo(std::wstring name, const std::wstring& target) {
+    std::string raw; bg::readAll(appsFile, raw);
+    if (!raw.empty() && raw.back() != '\n') raw += "\r\n";
+    for (auto& c : name) if (c == L'|') c = L'/';
+    raw += toUtf8(name + L" | " + target) + "\r\n";
+    bg::writeAll(appsFile, raw);
+}
+static void removeAtajo(const std::wstring& target) {
+    std::string raw; if (!bg::readAll(appsFile, raw)) return;
+    std::string out; size_t p = 0;
+    while (p < raw.size()) {
+        size_t e = raw.find('\n', p); if (e == std::string::npos) e = raw.size();
+        std::string l = raw.substr(p, e - p); p = e + 1;
+        std::wstring w = trim(fromUtf8(l));
+        bool drop = false;
+        if (!w.empty() && w[0] != L'#') {
+            size_t a = w.find(L'|');
+            if (a != std::wstring::npos) {
+                size_t b = w.find(L'|', a + 1);
+                std::wstring t = expandEnv(trim(w.substr(a + 1, b == std::wstring::npos ? std::wstring::npos : b - a - 1)));
+                drop = !_wcsicmp(t.c_str(), target.c_str());
+            }
+        }
+        if (!drop) { out += l; if (e < raw.size()) out += "\n"; }
+    }
+    bg::writeAll(appsFile, out);
+}
+static void sTogglePin(int ri) {
+    if (ri < 0 || ri >= (int)sRes.size()) return;
+    const SApp& a = sApps[sRes[ri]];
+    std::wstring t = APPS_PREFIX + a.id, cur = sPinnedTarget(a);
+    if (!cur.empty()) { removeAtajo(cur); sMsg = L"Quitada de los atajos"; }
+    else if (apps.size() >= 6) sMsg = L"Ya hay 6 atajos: quita uno antes";
+    else { appendAtajo(a.name, t); sMsg = L"Añadida a los atajos"; }
+    sMsgAt = nowMs();
+    loadApps(); loadIcons(); cacheValid = false;
+}
+static void grabFocus() {
+    HWND fg = GetForegroundWindow();
+    if (fg != gHwnd && !SetForegroundWindow(gHwnd)) {
+        DWORD ft = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
+        if (ft && ft != me && AttachThreadInput(me, ft, TRUE)) { SetForegroundWindow(gHwnd); AttachThreadInput(me, ft, FALSE); }
+    }
+    SetFocus(gHwnd);
+}
+static void startSearch() {
+    view = V_SEARCH; sActive = true; sQ.clear(); sMsg.clear(); sCaret = true;
+    HWND fg = GetForegroundWindow(); if (fg != gHwnd) sPrevFg = fg;
+    grabFocus();  // para poder escribir
+    SetTimer(gHwnd, T_CARET, 530, nullptr);
+    if (!sLoaded) std::thread(enumApps, ++sGen).detach();
+    sFilter();
+}
+static void endSearch(bool restoreFocus) {
+    if (!sActive) return;
+    sActive = false; KillTimer(gHwnd, T_CARET); freeSearchIcons();
+    if (restoreFocus && GetForegroundWindow() == gHwnd && sPrevFg && IsWindow(sPrevFg)) SetForegroundWindow(sPrevFg);
+    sPrevFg = nullptr;
+    if (view == V_SEARCH) view = lastTab;
+    if (expanded && !hovered) SetTimer(gHwnd, T_COLLAPSE, 450, nullptr);  // con el ratón fuera, se pliega como siempre
+}
+static void sLaunch(int ri) {
+    if (ri < 0 || ri >= (int)sRes.size()) return;
+    std::wstring t = APPS_PREFIX + sApps[sRes[ri]].id;
+    endSearch(false);
+    ShellExecuteW(nullptr, L"open", t.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
 // ---------------------------------------------------------------- recursos de dibujo
 static IDWriteTextFormat* mkFont(const wchar_t* fam, float size, DWRITE_FONT_WEIGHT w) {
     IDWriteTextFormat* f = nullptr;
@@ -1133,6 +1313,7 @@ static void createResources() {
     fTiny = mkFont(T, 10, DWRITE_FONT_WEIGHT_NORMAL);
     fApp = mkFont(T, 10, DWRITE_FONT_WEIGHT_NORMAL);
     fTab = mkFont(T, 12, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    fSearch = mkFont(T, 15, DWRITE_FONT_WEIGHT_NORMAL);
     fBig = mkFont(D, 32, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     fMid = mkFont(D, 20, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     fGlyph = mkFont(I, 30, DWRITE_FONT_WEIGHT_NORMAL);
@@ -1149,7 +1330,7 @@ static void createResources() {
 static void createTarget() {
     SafeRelease(cacheRT); cacheValid = false;
     for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; }
-    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; freeIcons();
+    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; freeIcons(); freeSearchIcons();
     D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 0, 0);
     d2d->CreateDCRenderTarget(&p, &dcrt); rt = dcrt;
@@ -1174,7 +1355,7 @@ static void updateMonitor() {
     float s = dx / 96.f * SIZES[cfg.size];
     if (s != scale || !rt) {
         dpi = dx; scale = s;
-        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
+        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeIcons(); freeSearchIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
         ensureDib();
         if (expanded) loadIcons();
     }
@@ -1601,7 +1782,101 @@ static void drawApps(float x, float y, float w, float h, int idx) {
         text(apps[i].name, fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
         addHit(ix - gap / 2, iy - 4, colW, is + 22, id);
     }
-    if (apps.empty()) { col(1, 1, 1, 0.4f); text(L"Sin atajos", fTiny, x, y + h / 2 - 7, w, 14, DWRITE_TEXT_ALIGNMENT_CENTER); }
+    if (apps.size() < 6) {  // hueco libre: abre el buscador para añadir una app
+        size_t i = apps.size(); int c = (int)i % 2, r = (int)i / 2;
+        float ix = x0 + c * colW, iy = y + 14 + r * 66, hh = hv(H_APP_ADD);
+        float k = 1 + 0.06f * hh - 0.1f * prs(H_APP_ADD), s = (is - 4) * k, ox = ix + (is - s) / 2, oy = iy + (is - s) / 2;
+        col(1, 1, 1, 0.05f + 0.06f * hh); fillRR(ox, oy, s, s, 10);
+        col(1, 1, 1, 0.25f + 0.3f * hh);
+        D2D1_ROUNDED_RECT rr{{ox, oy, ox + s, oy + s}, 10, 10}; rt->DrawRoundedRectangle(&rr, br, 1.3f, dashStroke);
+        col(1, 1, 1, 0.55f + 0.4f * hh);
+        float cx = ix + is / 2, cy = iy + is / 2;
+        line(cx - 5, cy, cx + 5, cy, 1.6f); line(cx, cy - 5, cx, cy + 5, 1.6f);
+        col(1, 1, 1, 0.4f + 0.4f * hh);
+        text(L"Añadir", fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
+        addHit(ix - gap / 2, iy - 4, colW, is + 22, H_APP_ADD);
+    }
+}
+
+// ---------------------------------------------------------------- buscador de aplicaciones
+static const D2D1_COLOR_F WINBLUE{0.18f, 0.62f, 1.f, 1};
+static void winLogo(float cx, float cy, float s, D2D1_COLOR_F c) {
+    float g = s * 0.1f, q = (s - g) / 2, x = cx - s / 2, y = cy - s / 2;
+    colC(c);
+    fillRR(x, y, q, q, 0.8f); fillRR(x + q + g, y, q, q, 0.8f);
+    fillRR(x, y + q + g, q, q, 0.8f); fillRR(x + q + g, y + q + g, q, q, 0.8f);
+}
+static float textWidthTrail(const std::wstring& s, IDWriteTextFormat* f) {
+    IDWriteTextLayout* lay = nullptr; float w = 0;
+    if (SUCCEEDED(dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, 2000, 30, &lay))) { DWRITE_TEXT_METRICS m; lay->GetMetrics(&m); w = m.widthIncludingTrailingWhitespace; lay->Release(); }
+    return w;
+}
+static void drawSearch(float x, float y, float w, float h) {
+    beginCard(0, y); card(x, y, w, h);
+    // campo de texto
+    float fx = x + 12, fy = y + 12, fw = w - 24, fh = 34;
+    col(1, 1, 1, 0.09f + 0.03f * hv(H_SRCH)); fillRR(fx, fy, fw, fh, 12);
+    winLogo(fx + 19, fy + fh / 2, 13, WINBLUE);
+    float tx = fx + 38, tmax = fw - 38 - 200;
+    if (sQ.empty()) { col(1, 1, 1, 0.35f); text(L"Buscar aplicaciones", fSearch, tx, fy, tmax, fh); }
+    else { col(1, 1, 1); text(sQ, fSearch, tx, fy, tmax, fh); }
+    if (sCaret) { float cw = sQ.empty() ? 0 : std::min(textWidthTrail(sQ, fSearch), tmax); colC(ACC()); fillRR(tx + cw + 1, fy + 9, 1.6f, fh - 18, 0.8f); }
+    addHit(fx, fy, fw, fh, H_SRCH);
+    // resultados en 2 columnas
+    const float gx = x + 12, gy = y + 54, colw = (w - 24 - 8) / 2, rh = 37;
+    int hoverPin = -1;
+    for (int k = 0; k < S_COLS * S_ROWS; k++) {
+        int ri = sScroll * S_COLS + k; if (ri >= (int)sRes.size()) break;
+        const SApp& a = sApps[sRes[ri]];
+        float rx = gx + (k % S_COLS) * (colw + 8), ry = gy + (k / S_COLS) * rh, bh = rh - 3;
+        int id = H_SRCH_RES + k, pid = H_SRCH_PIN + k;
+        bool sel = ri == sSel; float hh = std::max(hv(id), hv(pid));
+        if (hoverId == pid) hoverPin = ri;
+        if (sel) { colC(ACC(), 0.3f + 0.08f * hh); fillRR(rx, ry, colw, bh, 10); }
+        else if (hh > 0.01f) { col(1, 1, 1, 0.07f * hh); fillRR(rx, ry, colw, bh, 10); }
+        auto it = sIcons.find(a.id);
+        if (it == sIcons.end()) it = sIcons.emplace(a.id, thumbFor(APPS_PREFIX + a.id, (UINT)lroundf(24 * scale), SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK)).first;
+        float is = 24, ix = rx + 9, iy = ry + (bh - is) / 2;
+        if (it->second) {
+            D2D1_SIZE_F bs = it->second->GetSize(); float kk = is / std::max(bs.width, bs.height);
+            float dw_ = bs.width * kk, dh_ = bs.height * kk;
+            D2D1_RECT_F d{ix + (is - dw_) / 2, iy + (is - dh_) / 2, ix + (is + dw_) / 2, iy + (is + dh_) / 2};
+            rt->DrawBitmap(it->second, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+        } else {
+            col(0.3f, 0.3f, 0.32f); fillRR(ix, iy, is, is, 6);
+            col(1, 1, 1, 0.9f); text(a.name.substr(0, 1), fSmall, ix, iy, is, is, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        col(1, 1, 1, 0.92f); text(a.name, fBody, rx + 42, ry, colw - 42 - 40, bh);
+        // añadir a los atajos / quitar
+        bool pinned = sPinned(a);
+        float pcx = rx + colw - 19, pcy = ry + bh / 2, show = pinned ? 1.f : std::max(sel ? 1.f : 0.f, hh);
+        if (show > 0.01f) {
+            float ph = hv(pid), pk = 1 - 0.1f * prs(pid);
+            if (pinned) {
+                colC(ACC(), show); circle(pcx, pcy, 10 * pk);
+                col(1, 1, 1, show); line(pcx - 4, pcy + 0.3f, pcx - 1.2f, pcy + 3.2f, 1.6f); line(pcx - 1.2f, pcy + 3.2f, pcx + 4.2f, pcy - 3, 1.6f);
+            } else {
+                col(1, 1, 1, (0.12f + 0.14f * ph) * show); circle(pcx, pcy, 10 * pk);
+                col(1, 1, 1, 0.9f * show); line(pcx - 4, pcy, pcx + 4, pcy, 1.6f); line(pcx, pcy - 4, pcx, pcy + 4, 1.6f);
+            }
+            addHit(pcx - 12, pcy - 12, 24, 24, pid);
+        }
+        addHit(rx, ry, colw, bh, id);
+    }
+    // texto a la derecha del campo
+    std::wstring info;
+    if (!sMsg.empty() && nowMs() - sMsgAt < 2500) info = sMsg;
+    else if (hoverPin >= 0) info = sPinned(sApps[sRes[hoverPin]]) ? L"Quitar de los atajos" : apps.size() >= 6 ? L"Atajos llenos (6)" : L"Añadir a los atajos";
+    else if (!sLoaded) info = L"Cargando...";
+    else info = std::to_wstring(sRes.size()) + (sRes.size() == 1 ? L" app" : L" apps");
+    col(1, 1, 1, 0.4f); text(info, fTiny, fx + fw - 190, fy, 176, fh, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    if (sLoaded && sRes.empty()) { col(1, 1, 1, 0.4f); text(L"Sin resultados", fSmall, x, gy + 50, w, 20, DWRITE_TEXT_ALIGNMENT_CENTER); }
+    // barra de desplazamiento
+    int rows = ((int)sRes.size() + S_COLS - 1) / S_COLS;
+    if (rows > S_ROWS) {
+        float th = S_ROWS * rh - 3, bx = x + w - 6, kh = std::max(18.f, th * S_ROWS / rows), ky = gy + (th - kh) * sScroll / (float)sMaxScroll();
+        col(1, 1, 1, 0.18f); fillRR(bx - 1.5f, ky, 3, kh, 1.5f);
+    }
 }
 
 // ---------------------------------------------------------------- pestaña Herramientas
@@ -1916,7 +2191,7 @@ static void drawHeader(float ox, float oy) {
     const float tws[3] = {70, 112, 94}, sts[3] = {0, 70, 182};
     const wchar_t* T[3] = {L"Inicio", L"Herramientas", L"Bandeja"};
     col(1, 1, 1, 0.08f); fillRR(tx, hy, tws[0] + tws[1] + tws[2] + 4, hh, 13);
-    float ti = tw(1, (float)(view == V_SET ? lastTab : view), 15), ia = tw(5, view == V_SET ? 0.25f : 1.f, 15);
+    float ti = tw(1, (float)(view >= V_SET ? lastTab : view), 15), ia = tw(5, view >= V_SET ? 0.25f : 1.f, 15);
     int i0 = std::min(1, std::max(0, (int)floorf(ti))); float fi = ti - i0;
     float ix = tx + 2 + sts[i0] + (sts[i0 + 1] - sts[i0]) * fi, iw = tws[i0] + (tws[i0 + 1] - tws[i0]) * fi;
     col(1, 1, 1, 0.18f * ia); fillRR(ix, hy + 2, iw, hh - 4, 11);
@@ -1958,8 +2233,14 @@ static void drawHeader(float ox, float oy) {
         line(qx + cosf(a) * 1.6f, gcy + sinf(a) * 1.6f, qx + cosf(a) * len, gcy + sinf(a) * len, 1.6f);
     }
     addHit(qx - 14, gcy - 14, 28, 28, H_CLAUDE);
-    float lx = qx - 20 - 90;
+    // buscador de aplicaciones (logo de Windows)
+    float wx = qx - 34, wh = hv(H_WIN), kw = 1 - 0.1f * prs(H_WIN), won = tw(18, view == V_SEARCH ? 1.f : 0.f, 14);
+    col(1, 1, 1, 0.08f + 0.08f * wh + 0.12f * won); circle(wx, gcy, 13 * kw);
+    winLogo(wx, gcy, 11 * kw, mix(WINBLUE, {1, 1, 1, 1}, 0.15f * wh));
+    addHit(wx - 14, gcy - 14, 28, 28, H_WIN);
+    float lx = wx - 20 - 90;
     if (ch > 0.01f) { col(1, 1, 1, 0.75f * ch); text(L"Claude Code", fTiny, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING); }
+    else if (wh > 0.01f) { col(1, 1, 1, 0.75f * wh); text(L"Buscar apps", fTiny, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING); }
     // temporizador en marcha visible desde cualquier pestaña
     else if (tmState == 1 && view != 1) {
         colC(timerColor()); textN(fmtClock(tmRemaining(), true), fTab, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -1980,6 +2261,8 @@ static void drawView(int v, float ox, float y) {
         drawControls(x, y, ox + EW - 12 - x, h, 2);
     } else if (v == V_SHELF) {
         drawShelf(x, y, EW - 24, h);
+    } else if (v == V_SEARCH) {
+        drawSearch(x, y, EW - 24, h);
     } else {
         drawGeneral(x, y, 250, h, 0); x += 260;
         drawCalSettings(x, y, 210, h, 1); x += 220;
@@ -2035,6 +2318,7 @@ static void buildCache() {
 }
 
 static void render() {
+    if (sActive && (view != V_SEARCH || !expanded)) endSearch(true);  // se salió del buscador por cualquier vía
     if (!visible || !rt) { updateTick(); return; }
     float w = sw.x, h = sh.x, r = clampf(sr.x, std::min(4.f, h / 2), h / 2);
     int W = (int)ceilf((w + 2 * M) * scale), H = (int)ceilf((h + 2 * M) * scale);
@@ -2169,6 +2453,7 @@ static void onSettled() {
     if (!expanded) {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
+        std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -2367,6 +2652,11 @@ static void click(int id) {
         if (pomo) { if (pomoPhase == 0) { pomoCount++; pomoArm(1); } else pomoArm(0); if (tmState) { tmEnd = nowMs() + tmDur; tmState = 1; } }
     }
     else if (id == H_CLAUDE) { setExpanded(false); launchClaude(); return; }
+    else if (id == H_WIN) { if (view == V_SEARCH) view = lastTab; else startSearch(); }
+    else if (id == H_APP_ADD) startSearch();
+    else if (id == H_SRCH) grabFocus();
+    else if (id >= H_SRCH_RES && id < H_SRCH_RES + S_COLS * S_ROWS) { sLaunch(sScroll * S_COLS + id - H_SRCH_RES); setExpanded(false); return; }
+    else if (id >= H_SRCH_PIN && id < H_SRCH_PIN + S_COLS * S_ROWS) { sSel = sScroll * S_COLS + id - H_SRCH_PIN; sTogglePin(sSel); }
     else if (id == H_SW_R) { if (swRun) { swAcc = swElapsed(); swRun = false; } else { swStart = nowMs(); swRun = true; } }
     else if (id == H_SW_L) { if (swRun) { laps.push_back(swElapsed()); if (laps.size() > 99) laps.erase(laps.begin()); } else { swAcc = 0; laps.clear(); } }
     else if (id == H_Q) setCaffeine(!caffeine);
@@ -2573,13 +2863,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == T_POLL) {
             checkFullscreen();
             if (visible) ensureTopmost();
-        } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); setExpanded(false); }
+        } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
+        else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();
         else if (wp == T_HOVER) { KillTimer(h, T_HOVER); if (hovered && !expanded) openFromPill(); }
         else if (wp == T_TRIM) { KillTimer(h, T_TRIM); if (!expanded) trimMemory(); }
         return 0;
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, (!expanded || hoverId) ? IDC_HAND : IDC_ARROW)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, hoverId == H_SRCH ? IDC_IBEAM : (!expanded || hoverId) ? IDC_HAND : IDC_ARROW)); return TRUE; }
         break;
     case WM_MOUSEMOVE: {
         if (!hovered) {
@@ -2606,7 +2897,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         if (peeking) return 0;  // al ver a través el ratón "sale"; lo gestiona peekTick
         hovered = false; hoverId = H_NONE; KillTimer(h, T_HOVER);
-        if (expanded) SetTimer(h, T_COLLAPSE, 450, nullptr);
+        if (expanded) { if (!sActive) SetTimer(h, T_COLLAPSE, 450, nullptr); }  // escribiendo en el buscador no se pliega
         else collapsedTargets();
         if (!animating) render();
         return 0;
@@ -2638,6 +2929,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)}; ScreenToClient(h, &pt);
         LPARAM cl = MAKELPARAM(pt.x, pt.y);
         int id = hitAt(cl), d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
+        if (view == V_SEARCH) { sScroll = std::clamp(sScroll + d, 0, sMaxScroll()); render(); return 0; }
         if (id >= H_PICK && id < H_PICK + 3 && !pomo && tmState == 0) {
             int c = id - H_PICK; auto it = tweens.find(700 + c);
             pickT[c] = roundf(it != tweens.end() ? it->second.t : pickT[c]) + d; updatePick();
@@ -2647,7 +2939,68 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         render();
         return 0;
     }
-    case WM_RBUTTONUP: if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
+    case WM_KEYDOWN: {
+        if (!sActive) break;
+        int n = (int)sRes.size(); bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        sCaret = true; SetTimer(h, T_CARET, 530, nullptr);
+        switch (wp) {
+        case VK_ESCAPE: if (!sQ.empty()) { sQ.clear(); sFilter(); } else view = lastTab; break;
+        case VK_RETURN: if (n) { if (ctrl) sTogglePin(sSel); else { sLaunch(sSel); setExpanded(false); return 0; } } break;
+        case VK_DOWN: if (n) sSel = std::min(n - 1, sSel + S_COLS); break;
+        case VK_UP: if (n) sSel = std::max(0, sSel - S_COLS); break;
+        case VK_RIGHT: if (n) sSel = std::min(n - 1, sSel + 1); break;
+        case VK_LEFT: if (n) sSel = std::max(0, sSel - 1); break;
+        case VK_NEXT: if (n) sSel = std::min(n - 1, sSel + S_COLS * S_ROWS); break;
+        case VK_PRIOR: if (n) sSel = std::max(0, sSel - S_COLS * S_ROWS); break;
+        default: return 0;
+        }
+        sEnsureVisible(); render();
+        return 0;
+    }
+    case WM_CHAR: {
+        if (!sActive) break;
+        wchar_t c = (wchar_t)wp;
+        if (c == 8) { if (!sQ.empty()) sQ.pop_back(); }
+        else if (c == 127) {  // Ctrl+Retroceso: borra la última palabra
+            while (!sQ.empty() && sQ.back() == L' ') sQ.pop_back();
+            while (!sQ.empty() && sQ.back() != L' ') sQ.pop_back();
+        } else if (c == 22) {  // Ctrl+V
+            if (OpenClipboard(h)) {
+                if (HANDLE hd = GetClipboardData(CF_UNICODETEXT)) {
+                    if (const wchar_t* t = (const wchar_t*)GlobalLock(hd)) {
+                        for (; *t && sQ.size() < 80; t++) if (*t >= 32) sQ += *t;
+                        GlobalUnlock(hd);
+                    }
+                }
+                CloseClipboard();
+            }
+        } else if (c >= 32 && sQ.size() < 80) sQ += c;
+        else return 0;
+        sCaret = true; SetTimer(h, T_CARET, 530, nullptr);
+        sFilter(); render();
+        return 0;
+    }
+    case WM_ACTIVATE:
+        // se hizo clic en otra ventana mientras se buscaba: se cierra
+        if (LOWORD(wp) == WA_INACTIVE && sActive) { endSearch(false); if (!hovered) setExpanded(false); else render(); }
+        break;
+    case WM_APP_APPS:
+        if ((unsigned)wp == sGen && expanded) {
+            { std::lock_guard<std::mutex> lk(gMx); sApps.swap(gAppsShared); }
+            sLoaded = true;
+            if (sActive) { sFilter(); if (!animating) render(); }
+        }
+        { std::lock_guard<std::mutex> lk(gMx); std::vector<SApp>().swap(gAppsShared); }
+        return 0;
+    case WM_RBUTTONUP:
+        if (expanded) {
+            int id = hitAt(lp);
+            if (id >= H_APP && id < H_APP + (int)apps.size()) {  // clic derecho en un atajo: se quita
+                removeAtajo(apps[id - H_APP].target); loadApps(); loadIcons(); cacheValid = false; hoverId = H_NONE; render();
+                return 0;
+            }
+        }
+        if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_APP_MEDIA: {
         { std::lock_guard<std::mutex> lk(gMx); media.has = gMediaShared.has; media.playing = gMediaShared.playing; media.title = gMediaShared.title;

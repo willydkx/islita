@@ -44,6 +44,8 @@
 #include <dwmapi.h>
 #include <wbemidl.h>
 #include <shlwapi.h>
+#include <propsys.h>
+#include <propvarutil.h>
 
 // ---------------------------------------------------------------- constantes
 static const float EW = 720, EH = 264, ER = 40;   // panel abierto
@@ -690,7 +692,7 @@ static MediaInfo media;            // copia de la UI
 static StatsInfo stats;
 static ID2D1Bitmap *artBmp, *artSBmp; static unsigned artVerUI = ~0u;
 
-struct App { std::wstring name, target, icon, args; ID2D1Bitmap* bmp = nullptr; };
+struct App { std::wstring name, target, icon, args; ID2D1Bitmap* bmp = nullptr; bool resolved = false; std::wstring mExe, mExe2, mAumid; };  // m*: para reconocerla abierta
 static std::vector<App> apps; static bool iconsLoaded = false; static FILETIME appsStamp{};
 static const int APPS_PER_PAGE = 6, MAX_APPS = 36;  // 6 páginas de 6
 static int appPage = 0;
@@ -1024,6 +1026,181 @@ static void loadIcons() {
     }
 }
 
+
+// ---------------------------------------------------------------- apps abiertas (como la barra de tareas) delante de los atajos
+struct RunApp { std::wstring key, exe, aumid; std::vector<HWND> wins; };
+struct Tile { int pin = -1, run = -1; };  // índice en apps (atajo) y/o en running (abierta)
+static std::vector<RunApp> running; static std::vector<std::wstring> runOrder; static std::vector<Tile> tiles;
+static std::map<std::wstring, ID2D1Bitmap*> runIcons; static std::map<std::wstring, std::wstring> runNames;
+static HWND fgAtOpen = nullptr;
+static const int MAX_TILES = 59;
+static const PROPERTYKEY PKEY_AUMID_ = {{0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
+static const PROPERTYKEY PKEY_LinkTarget_ = {{0xB9B4B3FC, 0x2B51, 0x4A42, {0xB5, 0xD8, 0x32, 0x41, 0x46, 0xAF, 0xCF, 0x25}}, 2};
+static void freeRunIcons() { for (auto& p : runIcons) if (p.second) p.second->Release(); runIcons.clear(); }
+static std::wstring lowerW(std::wstring s) { if (!s.empty()) CharLowerBuffW(&s[0], (DWORD)s.size()); return s; }
+static bool endsWithI(const std::wstring& s, const wchar_t* e) { size_t n = wcslen(e); return s.size() >= n && !_wcsicmp(s.c_str() + s.size() - n, e); }
+static std::wstring exeOfPid(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return L"";
+    wchar_t b[MAX_PATH * 2]; DWORD n = MAX_PATH * 2; std::wstring r;
+    if (QueryFullProcessImageNameW(h, 0, b, &n)) r.assign(b, n);
+    CloseHandle(h); return r;
+}
+static std::wstring aumidOf(HWND h) {
+    std::wstring r; IPropertyStore* ps = nullptr;
+    if (SUCCEEDED(SHGetPropertyStoreForWindow(h, IID_PPV_ARGS(&ps))) && ps) {
+        PROPVARIANT v; PropVariantInit(&v);
+        if (SUCCEEDED(ps->GetValue(PKEY_AUMID_, &v)) && v.vt == VT_LPWSTR && v.pwszVal) r = v.pwszVal;
+        PropVariantClear(&v); ps->Release();
+    }
+    return r;
+}
+// ventanas que saldrían en la barra de tareas
+static bool isTaskWindow(HWND h) {
+    if (h == gHwnd || !IsWindowVisible(h)) return false;
+    LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    if (!(ex & WS_EX_APPWINDOW) && (GetWindow(h, GW_OWNER) || (ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)))) return false;
+    int cloaked = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+    if (cloaked || GetWindowTextLengthW(h) == 0) return false;
+    wchar_t c[64]; GetClassNameW(h, c, 64);
+    return wcscmp(c, L"Progman") && wcscmp(c, L"WorkerW") && !isTray(h);
+}
+static BOOL CALLBACK enumTaskWin(HWND h, LPARAM lp) { if (isTaskWindow(h)) ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }
+struct ChildPid { DWORD frame, found; };
+static BOOL CALLBACK enumUwpChild(HWND h, LPARAM lp) {
+    auto* c = (ChildPid*)lp; DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (pid && pid != c->frame) { c->found = pid; return FALSE; }
+    return TRUE;
+}
+static void refreshRunning() {
+    std::vector<HWND> ws; EnumWindows(enumTaskWin, (LPARAM)&ws);
+    std::map<std::wstring, RunApp> m; std::vector<std::wstring> seen;
+    for (HWND h : ws) {
+        DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+        std::wstring exe = exeOfPid(pid);
+        if (endsWithI(exe, L"\\ApplicationFrameHost.exe")) {  // apps de la Store: el proceso de verdad es el de dentro
+            ChildPid c{pid, 0}; EnumChildWindows(h, enumUwpChild, (LPARAM)&c);
+            if (c.found) exe = exeOfPid(c.found);
+        }
+        std::wstring au = aumidOf(h);
+        if (exe.empty() && au.empty()) continue;
+        std::wstring key = au.empty() ? L"e:" + lowerW(exe) : L"a:" + lowerW(au);
+        auto it = m.find(key);
+        if (it == m.end()) { RunApp r; r.key = key; r.exe = exe; r.aumid = au; it = m.emplace(key, r).first; seen.push_back(key); }
+        it->second.wins.push_back(h);
+    }
+    // orden estable: las que ya estaban no se mueven; las nuevas van al final
+    std::vector<std::wstring> order;
+    for (auto& k : runOrder) if (m.count(k)) order.push_back(k);
+    for (auto& k : seen) if (std::find(order.begin(), order.end(), k) == order.end()) order.push_back(k);
+    runOrder = order;
+    running.clear(); for (auto& k : order) running.push_back(m[k]);
+    HWND fg = GetForegroundWindow(); if (fg != gHwnd) fgAtOpen = fg;
+}
+static std::wstring exeDescription(const std::wstring& exe) {
+    DWORD hnd = 0, sz = GetFileVersionInfoSizeW(exe.c_str(), &hnd);
+    std::wstring r;
+    if (sz) {
+        std::vector<BYTE> b(sz);
+        struct LC { WORD l, c; }* tr = nullptr; UINT n = 0;
+        if (GetFileVersionInfoW(exe.c_str(), 0, sz, b.data()) && VerQueryValueW(b.data(), L"\\VarFileInfo\\Translation", (void**)&tr, &n) && n >= sizeof(LC)) {
+            wchar_t q[64]; swprintf(q, 64, L"\\StringFileInfo\\%04x%04x\\FileDescription", tr->l, tr->c);
+            wchar_t* d = nullptr; UINT dl = 0;
+            if (VerQueryValueW(b.data(), q, (void**)&d, &dl) && d && dl > 1) r = trim(d);
+        }
+    }
+    if (r.empty()) { r = PathFindFileNameW(exe.c_str()); if (endsWithI(r, L".exe")) r.resize(r.size() - 4); }
+    return r;
+}
+static std::wstring runName(const RunApp& r) {
+    auto it = runNames.find(r.key); if (it != runNames.end()) return it->second;
+    std::wstring n;
+    if (!r.aumid.empty()) {
+        IShellItem* si = nullptr; LPWSTR dn = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + r.aumid).c_str(), nullptr, IID_PPV_ARGS(&si)))) {
+            if (SUCCEEDED(si->GetDisplayName(SIGDN_NORMALDISPLAY, &dn)) && dn) { n = dn; CoTaskMemFree(dn); }
+            si->Release();
+        }
+    }
+    if (n.empty() && !r.exe.empty()) n = exeDescription(r.exe);
+    runNames[r.key] = n; return n;
+}
+static ID2D1Bitmap* runIcon(const RunApp& r) {
+    auto it = runIcons.find(r.key); if (it != runIcons.end()) return it->second;
+    UINT px = (UINT)lroundf(36 * scale * 1.1f); ID2D1Bitmap* b = nullptr;
+    if (!r.aumid.empty()) b = thumbFor(L"shell:AppsFolder\\" + r.aumid, px, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK);
+    if (!b && !r.exe.empty()) {
+        HICON h = iconFor(r.exe, SHIL_JUMBO);
+        if (h) { b = bitmapFromIcon(h, px, true); DestroyIcon(h); }
+        if (!b && (h = iconFor(r.exe, SHIL_EXTRALARGE))) { b = bitmapFromIcon(h, px, false); DestroyIcon(h); }
+    }
+    runIcons[r.key] = b; return b;
+}
+// qué programa abre cada atajo, para reconocerlo cuando está abierto
+static void resolvePinned(App& a) {
+    if (a.resolved) return;
+    a.resolved = true;
+    const std::wstring pre = L"shell:AppsFolder\\";
+    if (!_wcsnicmp(a.target.c_str(), pre.c_str(), pre.size())) {
+        std::wstring id = a.target.substr(pre.size());
+        if (id.size() > 38 && id[0] == L'{' && id[37] == L'}') {
+            GUID g; LPWSTR kf = nullptr;
+            if (SUCCEEDED(CLSIDFromString(id.substr(0, 38).c_str(), &g)) && SUCCEEDED(SHGetKnownFolderPath(g, 0, nullptr, &kf)) && kf) a.mExe = std::wstring(kf) + id.substr(38);
+            CoTaskMemFree(kf);
+        } else {
+            a.mAumid = lowerW(id);
+            IShellItem2* si = nullptr; LPWSTR tp = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(a.target.c_str(), nullptr, IID_PPV_ARGS(&si)))) {
+                if (SUCCEEDED(si->GetString(PKEY_LinkTarget_, &tp)) && tp) { if (endsWithI(tp, L".exe")) a.mExe = tp; CoTaskMemFree(tp); }
+                si->Release();
+            }
+        }
+    } else if (endsWithI(a.target, L".exe")) {
+        a.mExe = a.target;
+        if (a.mExe.find(L'\\') == std::wstring::npos) { wchar_t full[MAX_PATH]; if (SearchPathW(nullptr, a.mExe.c_str(), nullptr, MAX_PATH, full, nullptr)) a.mExe = full; }
+    }
+    if (endsWithI(a.icon, L".exe")) a.mExe2 = a.icon;  // p. ej. Ajustes (ms-settings:) con el icono de SystemSettings.exe
+    a.mExe = lowerW(a.mExe); a.mExe2 = lowerW(a.mExe2);
+}
+static bool runMatches(const RunApp& r, const App& a) {
+    if (!a.mAumid.empty() && lowerW(r.aumid) == a.mAumid) return true;
+    std::wstring e = lowerW(r.exe);
+    return !e.empty() && (e == a.mExe || e == a.mExe2);
+}
+static void refreshTiles() {
+    for (auto& a : apps) resolvePinned(a);
+    refreshRunning();
+    tiles.clear();
+    std::vector<bool> used(apps.size(), false);
+    for (int r = 0; r < (int)running.size(); r++) {
+        Tile t; t.run = r;
+        for (int j = 0; j < (int)apps.size(); j++) if (!used[j] && runMatches(running[r], apps[j])) { t.pin = j; used[j] = true; break; }
+        tiles.push_back(t);
+    }
+    for (int j = 0; j < (int)apps.size(); j++) if (!used[j]) { Tile t; t.pin = j; tiles.push_back(t); }
+    if ((int)tiles.size() > MAX_TILES) tiles.resize(MAX_TILES);
+    cacheValid = false;
+}
+static std::wstring tileName(const Tile& t) { return t.pin >= 0 ? apps[t.pin].name : runName(running[t.run]); }
+static ID2D1Bitmap* tileIcon(const Tile& t) { return t.pin >= 0 && apps[t.pin].bmp ? apps[t.pin].bmp : t.run >= 0 ? runIcon(running[t.run]) : nullptr; }
+static void forceForeground(HWND w) {
+    if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+    if (!SetForegroundWindow(w)) {
+        HWND fg = GetForegroundWindow();
+        DWORD ft = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
+        if (ft && ft != me && AttachThreadInput(me, ft, TRUE)) { SetForegroundWindow(w); AttachThreadInput(me, ft, FALSE); }
+    }
+}
+// clic en una app abierta: va a su ventana; si ya estaba delante, a la siguiente o se minimiza (como la barra de tareas)
+static void activateRun(const RunApp& r) {
+    if (r.wins.empty()) return;
+    HWND top = r.wins.front();
+    if (top == fgAtOpen && !IsIconic(top)) {
+        if (r.wins.size() > 1) forceForeground(r.wins.back());
+        else ShowWindow(top, SW_MINIMIZE);
+    } else forceForeground(top);
+}
+
 // ---------------------------------------------------------------- bandeja de archivos
 static std::string toUtf8(const std::wstring& w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -1353,7 +1530,7 @@ static void sTogglePin(int ri) {
     else if ((int)apps.size() >= MAX_APPS) sMsg = L"Atajos llenos (36): quita uno antes";
     else { appendAtajo(a.name, t); sMsg = L"Añadida a los atajos"; appPage = (int)apps.size() / APPS_PER_PAGE; }
     sMsgAt = nowMs();
-    loadApps(); loadIcons(); cacheValid = false;
+    loadApps(); loadIcons(); refreshTiles();
 }
 static void grabFocus() {
     HWND fg = GetForegroundWindow();
@@ -1431,7 +1608,7 @@ static void createResources() {
 static void createTarget() {
     SafeRelease(cacheRT); cacheValid = false;
     for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; }
-    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; freeIcons(); freeSearchIcons();
+    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; freeIcons(); freeSearchIcons(); freeRunIcons();
     D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 0, 0);
     d2d->CreateDCRenderTarget(&p, &dcrt); rt = dcrt;
@@ -1456,7 +1633,7 @@ static void updateMonitor() {
     float s = dx / 96.f * SIZES[cfg.size];
     if (s != scale || !rt) {
         dpi = dx; scale = s;
-        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeIcons(); freeSearchIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
+        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeIcons(); freeSearchIcons(); freeRunIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
         ensureDib();
         if (expanded) loadIcons();
     }
@@ -1985,24 +2162,32 @@ static void drawStats(float x, float y, float w, float h, int idx) {
     }
 }
 
-static int appSlots() { return (int)apps.size() + ((int)apps.size() < MAX_APPS ? 1 : 0); }  // atajos + hueco "Añadir"
+static int appSlots() { return (int)tiles.size() + ((int)apps.size() < MAX_APPS ? 1 : 0); }  // abiertas + atajos + hueco "Añadir"
 static int appPages() { return std::max(1, (appSlots() + APPS_PER_PAGE - 1) / APPS_PER_PAGE); }
 static void setAppPage(int p) { appPage = std::clamp(p, 0, appPages() - 1); }
 static void drawAppSlot(int i, float ix, float iy, float is, float gap, float colW, bool hitsHere) {
     bool hs = hitsOn; hitsOn = hs && hitsHere;
-    if (i < (int)apps.size()) {
+    if (i < (int)tiles.size()) {
+        const Tile& t = tiles[i];
         int id = H_APP + i;
         float k = 1 + 0.1f * hv(id) - 0.12f * prs(id);
         float s = is * k, ox = ix - (s - is) / 2, oy = iy - (s - is) / 2 - 2 * hv(id);
-        if (apps[i].bmp) {
+        std::wstring name = tileName(t);
+        if (ID2D1Bitmap* bmp = tileIcon(t)) {
             D2D1_RECT_F d{ox, oy, ox + s, oy + s};
-            rt->DrawBitmap(apps[i].bmp, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+            rt->DrawBitmap(bmp, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
         } else {
             col(0.25f, 0.25f, 0.27f); fillRR(ox, oy, s, s, 10);
-            col(1, 1, 1, 0.9f); text(apps[i].name.substr(0, 1), fTitle, ox, oy, s, s, DWRITE_TEXT_ALIGNMENT_CENTER);
+            col(1, 1, 1, 0.9f); text(name.substr(0, 1), fTitle, ox, oy, s, s, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        if (t.run >= 0) {  // puntito de "abierta" (del color de acento si es la ventana activa)
+            const RunApp& r = running[t.run];
+            bool act = std::find(r.wins.begin(), r.wins.end(), fgAtOpen) != r.wins.end();
+            if (act) colC(ACC()); else col(1, 1, 1, 0.7f);
+            fillRR(ix + is / 2 - (act ? 4.f : 1.8f), iy + is + 2, act ? 8.f : 3.6f, 3, 1.5f);
         }
         col(1, 1, 1, 0.55f + 0.4f * hv(id));
-        text(apps[i].name, fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
+        text(name, fApp, ix - gap / 2, iy + is + 5, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
         addHit(ix - gap / 2, iy - 4, colW, is + 22, id);
     } else {  // hueco libre: abre el buscador para añadir una app
         float hh = hv(H_APP_ADD);
@@ -2711,6 +2896,7 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
+        freeRunIcons(); running.clear(); tiles.clear();
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -2736,7 +2922,7 @@ static void setExpanded(bool e, int v = -1) {
         SYSTEMTIME st; GetLocalTime(&st); calY = st.wYear; calM = st.wMonth; selDay = 0; twSnap(8, 0);
         FILETIME fs = fileStamp(appsFile);
         if (CompareFileTime(&fs, &appsStamp) != 0) loadApps();
-        loadIcons();
+        loadIcons(); refreshTiles(); appPage = 0; twSnap(19, 0);
         sw.t = EW; sh.t = EH; sr.t = ER;
         SetEvent(gWake);
     } else {
@@ -2825,7 +3011,7 @@ static void ensureTopmost() {
         if (IntersectRect(&x, &r, &me)) { SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }
     }
 }
-static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); }
+static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (expanded && !sActive) { refreshTiles(); if (!animating) render(); } }
 
 static void scheduleClock() {
     SYSTEMTIME st; GetLocalTime(&st);
@@ -2892,9 +3078,10 @@ static void click(int id) {
     else if (id > H_DAY && id < H_DAY + 32) selDay = id - H_DAY;
     else if (id == H_CBACK) selDay = 0;
     else if (id == H_COPEN || (id >= H_EVT && id < H_EVT + 100)) { openCalendarDay(calY, calM, selDay); return; }
-    else if (id >= H_APP && id < H_APP + (int)apps.size()) {
-        App& a = apps[id - H_APP];
-        ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL);
+    else if (id >= H_APP && id < H_APP + (int)tiles.size()) {
+        Tile t = tiles[id - H_APP];
+        if (t.run >= 0) activateRun(running[t.run]);
+        else { App& a = apps[t.pin]; ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL); }
         setExpanded(false); return;
     }
     else if (id == H_TM_MODE || id == H_TM_MODE + 1) { dismissAlert(); setPomo(id == H_TM_MODE + 1); }
@@ -3271,8 +3458,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
         if (expanded) {
             int id = hitAt(lp);
-            if (id >= H_APP && id < H_APP + (int)apps.size()) {  // clic derecho en un atajo: se quita
-                removeAtajo(apps[id - H_APP].target); loadApps(); loadIcons(); cacheValid = false; hoverId = H_NONE; render();
+            if (id >= H_APP && id < H_APP + (int)tiles.size()) {  // clic derecho: quita el atajo, o fija la app abierta
+                Tile t = tiles[id - H_APP];
+                if (t.pin >= 0) removeAtajo(apps[t.pin].target);
+                else if ((int)apps.size() < MAX_APPS) {
+                    const RunApp& r = running[t.run];
+                    appendAtajo(runName(r), r.aumid.empty() ? r.exe : L"shell:AppsFolder\\" + r.aumid);
+                }
+                loadApps(); loadIcons(); refreshTiles(); hoverId = H_NONE; render();
                 return 0;
             }
         }

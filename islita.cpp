@@ -565,12 +565,14 @@ static std::vector<CalSrc> readCalFile() {
     return r;
 }
 static FILETIME calStamp{};
-static DWORD lastCalFetch = 0; static bool calEver = false;
+static DWORD lastCalFetch = 0; static bool calEver = false, calFailed = false;
 static void pollCalendar(bool expanded) {
     WIN32_FILE_ATTRIBUTE_DATA fa{}; GetFileAttributesExW(gCalFile.c_str(), GetFileExInfoStandard, &fa);
     bool changed = CompareFileTime(&fa.ftLastWriteTime, &calStamp) != 0;
     DWORD now = GetTickCount(), age = now - lastCalFetch;
-    if (calEver && !changed && age < (expanded ? 3u : 15u) * 60000u) return;
+    // sin red se reintenta cada 2 min (antes, con el panel abierto, reintentaba cada segundo y atascaba este hilo)
+    DWORD every = calFailed ? 2u * 60000u : (expanded ? 3u : 15u) * 60000u;
+    if (calEver && !changed && age < every) return;
     lastCalFetch = now; calEver = true;
     auto srcs = readCalFile();
     WIN32_FILE_ATTRIBUTE_DATA fb{}; GetFileAttributesExW(gCalFile.c_str(), GetFileExInfoStandard, &fb); calStamp = fb.ftLastWriteTime;
@@ -585,7 +587,7 @@ static void pollCalendar(bool expanded) {
         parseIcs(body, c, t - 62, t + 400, all);
     }
     std::stable_sort(all.begin(), all.end(), [](const CalEvent& a, const CalEvent& b) { return a.day != b.day ? a.day < b.day : a.start < b.start; });
-    if (failed) lastCalFetch = now - 13 * 60000;  // sin red: reintentar en 2 min (mientras, la copia guardada)
+    calFailed = failed;  // sin red: reintentar en 2 min (mientras, la copia guardada)
     { std::lock_guard<std::mutex> lk(gMx); gEventsShared.swap(all); }
     PostMessage(gHwnd, WM_APP_CAL, 0, 0);
 }
@@ -661,6 +663,7 @@ static const int ALERTS[3] = {15, 30, 60};
 
 // ---------------------------------------------------------------- estado
 static bool expanded = false, hovered = false, visible = true;
+static int gFlushes = 0;  // DwmFlush por fotograma (según la frecuencia de la pantalla)
 static int view = 0, lastTab = 0;  // 0 inicio, 1 herramientas, 2 ajustes
 static int hoverId = H_NONE, pressId = H_NONE;
 static int calY, calM;  // mes mostrado (m 1..12)
@@ -1046,7 +1049,7 @@ static void briLoop() {
 }
 static void briStart() {
     if (briRunning) return;
-    briRunning = true; briQuit = false;
+    briRunning = true; briQuit = false; briAvail = true;  // vuelve a probar (p. ej. al cambiar de pantalla)
     if (!briEvt) briEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     briThread = std::thread(briLoop);
 }
@@ -2246,8 +2249,14 @@ static void endPeek() {
     peeking = false;
     SetWindowLongPtrW(gHwnd, GWL_EXSTYLE, GetWindowLongPtrW(gHwnd, GWL_EXSTYLE) & ~WS_EX_TRANSPARENT);
     POINT pt; GetCursorPos(&pt); RECT r = pillScreenRect();
-    hovered = false;  // el siguiente movimiento del ratón lo vuelve a detectar
-    if (!PtInRect(&r, pt)) { hoverId = H_NONE; if (expanded) SetTimer(gHwnd, T_COLLAPSE, 450, nullptr); }
+    if (PtInRect(&r, pt)) {
+        // el ratón sigue encima: se queda "dentro" y se sigue vigilando Ctrl, para poder repetir sin moverlo
+        hovered = true;
+        TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, gHwnd, 0}; TrackMouseEvent(&t);  // el aviso de salida se perdió al ver a través
+    } else {
+        hovered = false; hoverId = H_NONE;
+        if (expanded) SetTimer(gHwnd, T_COLLAPSE, 450, nullptr);
+    }
     if (!expanded) collapsedTargets();
     render();
 }
@@ -2255,14 +2264,14 @@ static void peekTick() {
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     POINT pt; GetCursorPos(&pt); RECT r = pillScreenRect();
     bool inside = PtInRect(&r, pt) != 0;
-    if (!peeking && ctrl && hovered && inside) {
+    if (!peeking && ctrl && inside) {
         peeking = true;
         KillTimer(gHwnd, T_COLLAPSE); KillTimer(gHwnd, T_HOVER);
         // deja pasar los clics a lo que hay debajo
         SetWindowLongPtrW(gHwnd, GWL_EXSTYLE, GetWindowLongPtrW(gHwnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT);
         render();
     } else if (peeking && (!ctrl || !inside)) endPeek();
-    if (!hovered && !peeking) KillTimer(gHwnd, T_PEEK);
+    if ((!inside || !visible) && !peeking) KillTimer(gHwnd, T_PEEK);
 }
 static void ensureTopmost() {
     RECT me; GetWindowRect(gHwnd, &me);
@@ -2668,6 +2677,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return TRUE;
     case WM_TIMECHANGE: scheduleClock(); if (!animating) render(); return 0;
     case WM_DISPLAYCHANGE: case WM_DPICHANGED: case WM_SETTINGCHANGE:
+        if (msg == WM_DISPLAYCHANGE) gFlushes = 0;  // otra pantalla u otra frecuencia: recalcular
         updateMonitor(); render(); return 0;
     case WM_DESTROY:
         PlaySoundW(nullptr, nullptr, 0); setCaffeine(false); briStop(); RevokeDragDrop(h);
@@ -2733,7 +2743,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
                 LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
                 frame();
                 // a ~60-75 fotogramas por segundo aunque la pantalla vaya a 120/144 Hz: igual de fluido y la mitad de CPU
-                static int flushes = 0;
+                int& flushes = gFlushes;
                 if (!flushes) {
                     DWM_TIMING_INFO ti{}; ti.cbSize = sizeof ti;
                     double hz = SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &ti)) && ti.rateRefresh.uiDenominator ? (double)ti.rateRefresh.uiNumerator / ti.rateRefresh.uiDenominator : 60;

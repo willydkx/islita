@@ -57,9 +57,9 @@ static const float M = 18;                        // margen para la sombra
 enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES };
 enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
-       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN,
+       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -1484,6 +1484,65 @@ static void volInit() {
     if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &d))) { d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void**)&vol); d->Release(); }
     en->Release();
 }
+// salida de sonido, como en la barra de tareas. Windows no tiene una función pública para cambiar el
+// dispositivo predeterminado: se usa IPolicyConfig, la interfaz del propio panel de sonido (la usan también
+// EarTrumpet o SoundSwitch). Solo importa el orden de la tabla: se llama a SetDefaultEndpoint.
+struct IPolicyConfig_ : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDeviceFormat(PCWSTR, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProcessingPeriod(PCWSTR, INT, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetProcessingPeriod(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPropertyValue(PCWSTR, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR, ERole) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, INT) = 0;
+};
+static const CLSID CLSID_PolicyConfigClient_ = {0x870af99c, 0x171d, 0x4f9e, {0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9}};
+static const IID IID_IPolicyConfig_ = {0xf8679f50, 0x850a, 0x41cf, {0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8}};
+static const PROPERTYKEY PKEY_DevFriendlyName_ = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+struct AudioDev { std::wstring id, name; };
+static std::vector<AudioDev> devs; static std::wstring devCur; static bool devOpen = false;
+static void devLoad() {  // solo al abrir la lista
+    devs.clear(); devCur.clear();
+    IMMDeviceEnumerator* en = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en))) return;
+    IMMDevice* d = nullptr; LPWSTR id = nullptr;
+    if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &d))) { if (SUCCEEDED(d->GetId(&id)) && id) { devCur = id; CoTaskMemFree(id); } d->Release(); }
+    IMMDeviceCollection* c = nullptr;
+    if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &c))) {
+        UINT n = 0; c->GetCount(&n);
+        for (UINT i = 0; i < n; i++) {
+            IMMDevice* dv = nullptr; if (FAILED(c->Item(i, &dv))) continue;
+            AudioDev a; LPWSTR sid = nullptr;
+            if (SUCCEEDED(dv->GetId(&sid)) && sid) { a.id = sid; CoTaskMemFree(sid); }
+            IPropertyStore* ps = nullptr;
+            if (SUCCEEDED(dv->OpenPropertyStore(STGM_READ, &ps))) {
+                PROPVARIANT v; PropVariantInit(&v);
+                if (SUCCEEDED(ps->GetValue(PKEY_DevFriendlyName_, &v)) && v.vt == VT_LPWSTR && v.pwszVal) a.name = v.pwszVal;
+                PropVariantClear(&v); ps->Release();
+            }
+            if (!a.id.empty()) devs.push_back(a);
+            dv->Release();
+        }
+        c->Release();
+    }
+    en->Release();
+}
+static void devSet(int i) {  // como "Elegir dónde reproducir el sonido" de Configuración: consola y multimedia
+    if (i < 0 || i >= (int)devs.size()) return;
+    IPolicyConfig_* pc = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_PolicyConfigClient_, nullptr, CLSCTX_ALL, IID_IPolicyConfig_, (void**)&pc)) && pc) {
+        pc->SetDefaultEndpoint(devs[i].id.c_str(), eConsole);
+        pc->SetDefaultEndpoint(devs[i].id.c_str(), eMultimedia);
+        pc->Release();
+    }
+    devCur = devs[i].id;
+    SafeRelease(vol);  // el deslizador pasa a mover el nuevo
+}
 static float volGet(bool* mute) {
     float v = 0; BOOL m = FALSE;
     if (vol) { vol->GetMasterVolumeLevelScalar(&v); vol->GetMute(&m); }
@@ -2804,12 +2863,42 @@ static void slider(float x, float y, float w, float h, float v, const wchar_t* g
 }
 static void drawControls(float x, float y, float w, float h, int idx) {
     beginCard(idx, y); card(x, y, w, h);
+    if (devOpen) {  // lista de salidas de sonido
+        float bx = x + 24, by = y + 21;
+        col(1, 1, 1, 0.08f + 0.1f * hv(H_DEV_BACK)); circle(bx, by, 11);
+        col(1, 1, 1, 0.85f); glyph(L"\uE76B", fIcon, bx, by);
+        addHit(bx - 13, by - 13, 26, 26, H_DEV_BACK);
+        col(1, 1, 1, 0.5f); text(L"Salida de sonido", fCalHead, x + 42, y + 12, w - 56, 18);
+        if (devs.empty()) { col(1, 1, 1, 0.4f); text(L"No hay salidas de sonido", fSmall, x, y + h / 2 - 9, w, 18, DWRITE_TEXT_ALIGNMENT_CENTER); return; }
+        const float rh = 27;
+        int n = std::min((int)devs.size(), (int)((h - 46) / rh));
+        for (int i = 0; i < n; i++) {
+            float ry = y + 40 + i * rh, cy = ry + (rh - 3) / 2;
+            bool cur = devs[i].id == devCur; int id = H_DEV + i;
+            col(1, 1, 1, 0.07f * hv(id) + 0.05f * prs(id) + (cur ? 0.08f : 0.f)); fillRR(x + 8, ry, w - 16, rh - 3, 9);
+            std::wstring lo = lowerW(devs[i].name);
+            auto has = [&](std::initializer_list<const wchar_t*> ws) { for (auto w_ : ws) if (lo.find(w_) != std::wstring::npos) return true; return false; };
+            const wchar_t* g = has({L"auricular", L"headphone", L"headset", L"cascos", L"arctis", L"steelseries", L"hyperx", L"airpods", L"buds"}) ? L"\uE7F6"
+                             : has({L"hdmi", L"displayport", L"monitor", L"nvidia high definition", L"amd high definition", L"display audio"}) ? L"\uE7F4" : L"\uE7F5";
+            col(1, 1, 1, cur ? 0.95f : 0.6f); glyph(g, fIcon, x + 24, cy);
+            col(1, 1, 1, cur ? 1.f : 0.8f); text(devs[i].name, fSmall, x + 40, cy - 9, w - 40 - (cur ? 34 : 14), 18);
+            if (cur) { colC(ACC()); glyph(L"\uE73E", fIcon, x + w - 26, cy); }
+            addHit(x + 8, ry, w - 16, rh - 3, id);
+        }
+        return;
+    }
     cardTitle(L"Controles", x, y, {1, 1, 1, 1}, 0.5f);
     volInit(); briStart();
     bool mute = false; float v = volGet(&mute);
     float vx = x + 14, vw = w - 28;
-    volRect = {vx, y + 36, vx + vw, y + 66};
-    slider(vx, y + 36, vw, 30, mute ? 0 : v, mute || v < 0.01f ? L"\uE74F" : L"\uE767", H_VOL, 11, dragKind == 1, true);
+    // salida de sonido: flechita a la derecha del volumen (como en la barra de tareas)
+    float dvx = vx + vw - 13, dvy = y + 51, dh_ = hv(H_DEV_BTN), dk = 1 - 0.1f * prs(H_DEV_BTN);
+    col(1, 1, 1, 0.12f + 0.06f * dh_); circle(dvx, dvy, 13 * dk);
+    col(1, 1, 1, 0.85f); glyph(L"\uE76C", fIcon, dvx, dvy);
+    addHit(dvx - 14, dvy - 15, 28, 30, H_DEV_BTN);
+    float svw = vw - 34;
+    volRect = {vx, y + 36, vx + svw, y + 66};
+    slider(vx, y + 36, svw, 30, mute ? 0 : v, mute || v < 0.01f ? L"\uE74F" : L"\uE767", H_VOL, 11, dragKind == 1, true);
     int b = briCur;
     briRect = {vx, y + 72, vx + vw, y + 102};
     slider(vx, y + 72, vw, 30, b < 0 ? 0 : b / 100.f, L"\uE793", H_BRI, 14, dragKind == 2, briAvail && b >= 0);
@@ -3274,7 +3363,7 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
-        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps();
+        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps(); devOpen = false; std::vector<AudioDev>().swap(devs);
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -3495,6 +3584,9 @@ static void click(int id) {
     }
     else if (id == H_CLAUDE) { setExpanded(false); launchClaude(); return; }
     else if (id == H_WIN) { if (view == V_SEARCH) view = lastTab; else startSearch(); }
+    else if (id == H_DEV_BTN) { devLoad(); devOpen = true; }
+    else if (id == H_DEV_BACK) devOpen = false;
+    else if (id >= H_DEV && id < H_DEV + 20) { devSet(id - H_DEV); devOpen = false; }
     else if (id == H_TRAYBTN) { if (view == V_TRAY) view = lastTab; else { trayRefresh(); view = V_TRAY; } }
     else if (id >= H_TRAY && id < H_TRAY + 40) trayClick(id - H_TRAY, false);
     else if (id == H_APP_ADD) startSearch();
@@ -3845,7 +3937,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         { static int lastVi = -1; int vi = volIcon(); if (vi != lastVi) { lastVi = vi; if (!expanded && !animating) render(); } }
         return 0;
     case WM_APP_VOLDEV:
-        volIndInit(); if (!expanded && !animating) render();
+        volIndInit(); SafeRelease(vol);
+        if (devOpen) devLoad();
+        if (expanded) cacheValid = false;
+        if (!animating) render();
         return 0;
     case WM_APP_APPS:
         if ((unsigned)wp == sGen && expanded) {

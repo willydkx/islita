@@ -44,6 +44,7 @@ En la cabecera hay un botón con el **logo de Windows** que abre el buscador de 
 Al lado está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
 
 - Iniciar con Windows y abrir al pasar el ratón.
+- Ocultar la barra de tareas de Windows del todo. Las ventanas maximizadas ocupan toda la pantalla, y la tecla Windows, Alt+Tab y las notificaciones siguen funcionando. Al apagarlo o cerrar islita la barra vuelve tal y como estaba.
 - Ocultar en pantalla completa y modo rayita.
 - Tamaño (3) y color de acento (6).
 - Transparencia del fondo, siempre o según dónde esté el ratón.

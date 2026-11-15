@@ -708,7 +708,7 @@ static std::vector<CalEvent> events;  // copia de la UI
 static int selDay = 0;                // 0 = vista de mes; si no, día abierto en la agenda
 
 // ---------------------------------------------------------------- ajustes
-struct Settings { bool discreetOn = true, hoverOpen = false, hideFull = true, eq = true, battery = true, alerts = true, autostart = true; int alertMins = 60, size = 1, accent = 0, opacity = 1, transMode = 0; };  // transMode: 0 siempre, 1 con el ratón, 2 sin el ratón
+struct Settings { bool hideTaskbar = false, discreetOn = true, hoverOpen = false, hideFull = true, eq = true, battery = true, alerts = true, autostart = true; int alertMins = 60, size = 1, accent = 0, opacity = 1, transMode = 0; };  // transMode: 0 siempre, 1 con el ratón, 2 sin el ratón
 static Settings cfg;
 static const D2D1_COLOR_F ACCENTS[6] = {{1.f, 0.271f, 0.227f, 1}, {1.f, 0.624f, 0.04f, 1}, {0.188f, 0.82f, 0.345f, 1},
                                         {0.04f, 0.52f, 1.f, 1}, {0.75f, 0.35f, 0.95f, 1}, {1.f, 0.216f, 0.373f, 1}};
@@ -850,11 +850,64 @@ static void loadSettings() {
     cfg.accent = (int)std::min<DWORD>(regGet(L"Acento", 0), 5); cfg.autostart = autostartOn();
     cfg.opacity = (int)std::min<DWORD>(regGet(L"Opacidad", 1), 2);
     cfg.transMode = (int)std::min<DWORD>(regGet(L"TransparenteCuando", 0), 2);
+    cfg.hideTaskbar = regGet(L"OcultarBarra", 0);
 }
 static void saveSettings() {
     regSet(L"ModoDiscreto", cfg.discreetOn); regSet(L"AbrirAlPasar", cfg.hoverOpen); regSet(L"OcultarPantallaCompleta", cfg.hideFull); regSet(L"Ecualizador", cfg.eq);
     regSet(L"Bateria", cfg.battery); regSet(L"Avisos", cfg.alerts); regSet(L"AvisoMin", cfg.alertMins);
     regSet(L"Tamano", cfg.size); regSet(L"Acento", cfg.accent); regSet(L"Opacidad", cfg.opacity); regSet(L"TransparenteCuando", cfg.transMode);
+    regSet(L"OcultarBarra", cfg.hideTaskbar);
+}
+
+
+// ---------------------------------------------------------------- ocultar la barra de tareas de Windows
+// Se pone en "ocultar automáticamente" (así las ventanas maximizadas usan toda la pantalla) y además se esconde.
+// Al desactivarlo o cerrar islita vuelve tal y como estaba.
+static UINT WM_TASKBARCREATED = 0;
+static HWINEVENTHOOK trayHook = nullptr;
+static bool isTray(HWND h) {
+    wchar_t c[32]; if (!GetClassNameW(h, c, 32)) return false;
+    return !wcscmp(c, L"Shell_TrayWnd") || !wcscmp(c, L"Shell_SecondaryTrayWnd");
+}
+static void showTrays(bool show) {
+    HWND t = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (t && (IsWindowVisible(t) != 0) != show) ShowWindow(t, show ? SW_SHOWNA : SW_HIDE);
+    for (HWND s2 = nullptr; (s2 = FindWindowExW(nullptr, s2, L"Shell_SecondaryTrayWnd", nullptr));)
+        if ((IsWindowVisible(s2) != 0) != show) ShowWindow(s2, show ? SW_SHOWNA : SW_HIDE);
+}
+static void CALLBACK trayShown(HWINEVENTHOOK, DWORD, HWND h, LONG obj, LONG, DWORD, DWORD) {
+    if (obj == OBJID_WINDOW && cfg.hideTaskbar && h && isTray(h)) ShowWindow(h, SW_HIDE);  // Windows la ha vuelto a enseñar
+}
+static void setAutoHide(bool on) {
+    APPBARDATA ab{sizeof ab}; ab.hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!ab.hWnd) return;
+    UINT st = (UINT)SHAppBarMessage(ABM_GETSTATE, &ab);
+    if (((st & ABS_AUTOHIDE) != 0) == on) return;
+    ab.lParam = on ? (st | ABS_AUTOHIDE) : (st & ~ABS_AUTOHIDE);
+    SHAppBarMessage(ABM_SETSTATE, &ab);
+}
+static void applyTaskbar() {
+    HWND t = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (trayHook) { UnhookWinEvent(trayHook); trayHook = nullptr; }
+    if (cfg.hideTaskbar) {
+        if (!t) return;
+        if (regGet(L"BarraAutoAntes", 99) == 99) {  // recordar cómo estaba para dejarla igual
+            APPBARDATA ab{sizeof ab}; ab.hWnd = t;
+            regSet(L"BarraAutoAntes", (SHAppBarMessage(ABM_GETSTATE, &ab) & ABS_AUTOHIDE) ? 1 : 0);
+        }
+        setAutoHide(true);
+        showTrays(false);
+        DWORD pid = 0; GetWindowThreadProcessId(t, &pid);
+        trayHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, trayShown, pid, 0, WINEVENT_OUTOFCONTEXT);
+    } else {
+        showTrays(true);
+        DWORD before = regGet(L"BarraAutoAntes", 99);
+        if (before != 99) { setAutoHide(before == 1); regSet(L"BarraAutoAntes", 99); }
+    }
+}
+static void restoreTaskbarOnExit() {  // sin cambiar el ajuste: al volver a abrir islita se oculta otra vez
+    if (!cfg.hideTaskbar) return;
+    bool keep = cfg.hideTaskbar; cfg.hideTaskbar = false; applyTaskbar(); cfg.hideTaskbar = keep;
 }
 
 // ---------------------------------------------------------------- atajos (atajos.txt)
@@ -2269,15 +2322,16 @@ static void drawControls(float x, float y, float w, float h, int idx) {
 static void drawGeneral(float x, float y, float w, float h, int idx) {
     beginCard(idx, y); card(x, y, w, h);
     cardTitle(L"General", x, y, {1, 1, 1, 1}, 0.5f);
-    struct R { const wchar_t* l; bool on; int id; } r[6] = {
+    struct R { const wchar_t* l; bool on; int id; } r[7] = {
         {L"Iniciar con Windows", cfg.autostart, H_SET}, {L"Abrir al pasar el ratón", cfg.hoverOpen, H_SET + 1},
         {L"Rayita si hay una ventana debajo", cfg.discreetOn, H_SET + 6}, {L"Ocultar en pantalla completa", cfg.hideFull, H_SET + 2},
-        {L"Animar ecualizador", cfg.eq, H_SET + 3}, {L"Mostrar batería", cfg.battery, H_SET + 4}};
-    for (int i = 0; i < 6; i++) {
-        float ry = y + 47 + i * 27;
+        {L"Animar ecualizador", cfg.eq, H_SET + 3}, {L"Mostrar batería", cfg.battery, H_SET + 4},
+        {L"Ocultar barra de tareas", cfg.hideTaskbar, H_SET + 7}};
+    for (int i = 0; i < 7; i++) {
+        float ry = y + 42 + i * 24.5f;
         col(1, 1, 1, 0.9f); text(r[i].l, fSmall, x + 16, ry - 9, w - 78, 18);
         switchCtl(x + w - 16 - 42, ry, r[i].on, r[i].id - H_SET, r[i].id);
-        addHit(x + 8, ry - 13, w - 16, 26, r[i].id);
+        addHit(x + 8, ry - 12, w - 16, 24, r[i].id);
     }
 }
 static void drawCalSettings(float x, float y, float w, float h, int idx) {
@@ -2698,6 +2752,8 @@ static bool foregroundIsFullscreen() {
     if (!fg || fg == GetDesktopWindow() || fg == GetShellWindow() || fg == gHwnd) return false;
     wchar_t cls[64]; GetClassNameW(fg, cls, 64);
     if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    // maximizada (con borde para redimensionar) no es pantalla completa, aunque sin barra de tareas ocupe todo
+    if (IsZoomed(fg) && (GetWindowLongPtrW(fg, GWL_STYLE) & WS_THICKFRAME)) return false;
     RECT r; if (!GetWindowRect(fg, &r)) return false;
     return r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom;
 }
@@ -2873,6 +2929,7 @@ static void click(int id) {
     else if (id == H_SET + 3) cfg.eq = !cfg.eq;
     else if (id == H_SET + 4) cfg.battery = !cfg.battery;
     else if (id == H_SET + 6) { cfg.discreetOn = !cfg.discreetOn; updateDiscreet(); }
+    else if (id == H_SET + 7) { cfg.hideTaskbar = !cfg.hideTaskbar; applyTaskbar(); }
     else if (id == H_SET + 5) cfg.alerts = !cfg.alerts;
     else if (id >= H_SEG_ALERT && id < H_SEG_ALERT + 3) cfg.alertMins = ALERTS[id - H_SEG_ALERT];
     else if (id >= H_SEG_SIZE && id < H_SEG_SIZE + 3) { cfg.size = id - H_SEG_SIZE; saveSettings(); applySize(); }
@@ -3065,6 +3122,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (!animating && (cont || shown != lastShown)) { lastShown = shown; render(); }
         } else if (wp == T_CLOCK) { scheduleClock(); if (!expanded) collapsedTargets(); if (!animating) render(); }
         else if (wp == T_POLL) {
+            if (cfg.hideTaskbar) showTrays(false);  // por si se escapó algún aviso
             checkFullscreen();
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
@@ -3251,9 +3309,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_DISPLAYCHANGE) gFlushes = 0;  // otra pantalla u otra frecuencia: recalcular
         updateMonitor(); render(); return 0;
     case WM_DESTROY:
+        restoreTaskbarOnExit();
         PlaySoundW(nullptr, nullptr, 0); setCaffeine(false); briStop(); RevokeDragDrop(h);
         PostQuitMessage(0); return 0;
     }
+    if (msg == WM_TASKBARCREATED && WM_TASKBARCREATED) { applyTaskbar(); return 0; }  // el explorador se ha reiniciado
     return DefWindowProcW(h, msg, wp, lp);
 }
 
@@ -3309,6 +3369,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER, IID_IDropTargetHelper, (void**)&dropHelper);
     RegisterDragDrop(gHwnd, &dropTarget);
     netInit(); volIndInit(); render();
+    WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
+    applyTaskbar();
     RegisterPowerSettingNotification(gHwnd, &GUID_BATT, DEVICE_NOTIFY_WINDOW_HANDLE);
     RegisterPowerSettingNotification(gHwnd, &GUID_ACDC, DEVICE_NOTIFY_WINDOW_HANDLE);
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, winEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

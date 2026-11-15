@@ -3334,12 +3334,18 @@ static void peekTick() {
 static void ensureTopmost() {
     RECT me; GetWindowRect(gHwnd, &me);
     for (HWND a = GetWindow(gHwnd, GW_HWNDPREV); a; a = GetWindow(a, GW_HWNDPREV)) {
-        if (!IsWindowVisible(a) || !(GetWindowLongPtrW(a, GWL_EXSTYLE) & WS_EX_TOPMOST)) continue;
+        // cualquier ventana visible por delante (Windows a veces deja una normal encima de la isla
+        // al traer al frente una maximizada, aunque la isla siga marcada como "siempre encima")
+        if (!IsWindowVisible(a) || IsIconic(a)) continue;
+        int cloaked = 0; DwmGetWindowAttribute(a, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+        if (cloaked) continue;
+        wchar_t cl[32]; GetClassNameW(a, cl, 32);
+        if (!wcscmp(cl, L"#32768") || !wcscmp(cl, L"tooltips_class32")) continue;  // menús (p. ej. los de segundo plano) y ayudas: que queden encima
         RECT r, x; GetWindowRect(a, &r);
         if (IntersectRect(&x, &r, &me)) { SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }
     }
 }
-static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (expanded && !sActive && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
+static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (visible) ensureTopmost(); if (expanded && !sActive && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
 
 static void scheduleClock() {
     SYSTEMTIME st; GetLocalTime(&st);

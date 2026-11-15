@@ -26,7 +26,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente.
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
-  - Atajos a tus aplicaciones (hasta 6). El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
+  - Atajos a tus aplicaciones: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.
@@ -70,7 +70,7 @@ Todo se guarda en tu usuario. No hay nada que configurar dentro de la carpeta de
 
 | Qué | Dónde |
 |---|---|
-| Atajos (hasta 6) | `%APPDATA%\islita\atajos.txt`, una línea por app: `Nombre \| ruta \| icono opcional \| argumentos opcionales` |
+| Atajos (hasta 36) | `%APPDATA%\islita\atajos.txt`, una línea por app: `Nombre \| ruta \| icono opcional \| argumentos opcionales` |
 | Calendarios | `%APPDATA%\islita\calendarios.txt`, una línea por calendario: `Nombre \| dirección iCal` |
 | Bandeja | `%APPDATA%\islita\bandeja.txt` (solo rutas, no copias de los archivos) |
 | Ajustes | Registro, `HKCU\Software\islita` |

@@ -52,7 +52,7 @@ enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS };
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -646,6 +646,8 @@ static ID2D1Bitmap *artBmp, *artSBmp; static unsigned artVerUI = ~0u;
 
 struct App { std::wstring name, target, icon, args; ID2D1Bitmap* bmp = nullptr; };
 static std::vector<App> apps; static bool iconsLoaded = false; static FILETIME appsStamp{};
+static const int APPS_PER_PAGE = 6, MAX_APPS = 36;  // 6 páginas de 6
+static int appPage = 0;
 static std::wstring cfgDir, appsFile;
 // buscador de aplicaciones (botón con el logo de Windows): solo vive mientras está abierto
 struct SApp { std::wstring name, id, key, ini, path; };  // id = nombre de análisis en shell:AppsFolder; path = programa al que apunta (si se sabe)
@@ -820,7 +822,7 @@ static std::wstring trim(const std::wstring& s) {
 }
 static void writeDefaultApps() {
     std::string t =
-        "# Atajos de la isla: hasta 6 líneas con el formato\n"
+        "# Atajos de la isla: hasta 36 líneas (6 por página) con el formato\n"
         "#   Nombre | programa, carpeta o enlace | icono (opcional) | argumentos (opcional)\n"
         "# Se admiten variables como %LOCALAPPDATA%. Guarda y vuelve a abrir la isla.\n";
     struct D { const char* line; const wchar_t* check; };
@@ -855,7 +857,7 @@ static void loadApps() {
     int n = MultiByteToWideChar(CP_UTF8, 0, raw.data(), (int)raw.size(), nullptr, 0);
     std::wstring w(n, 0); MultiByteToWideChar(CP_UTF8, 0, raw.data(), (int)raw.size(), &w[0], n);
     size_t p = 0;
-    while (p < w.size() && apps.size() < 6) {
+    while (p < w.size() && (int)apps.size() < MAX_APPS) {
         size_t e = w.find(L'\n', p); if (e == std::wstring::npos) e = w.size();
         std::wstring line = trim(w.substr(p, e - p)); p = e + 1;
         if (line.empty() || line[0] == L'#') continue;
@@ -1249,8 +1251,8 @@ static void sTogglePin(int ri) {
     const SApp& a = sApps[sRes[ri]];
     std::wstring t = APPS_PREFIX + a.id, cur = sPinnedTarget(a);
     if (!cur.empty()) { removeAtajo(cur); sMsg = L"Quitada de los atajos"; }
-    else if (apps.size() >= 6) sMsg = L"Ya hay 6 atajos: quita uno antes";
-    else { appendAtajo(a.name, t); sMsg = L"Añadida a los atajos"; }
+    else if ((int)apps.size() >= MAX_APPS) sMsg = L"Atajos llenos (36): quita uno antes";
+    else { appendAtajo(a.name, t); sMsg = L"Añadida a los atajos"; appPage = (int)apps.size() / APPS_PER_PAGE; }
     sMsgAt = nowMs();
     loadApps(); loadIcons(); cacheValid = false;
 }
@@ -1761,14 +1763,13 @@ static void drawStats(float x, float y, float w, float h, int idx) {
     }
 }
 
-static void drawApps(float x, float y, float w, float h, int idx) {
-    beginCard(idx, y); card(x, y, w, h);
-    float is = 36, gap = 12, colW = is + gap;
-    float x0 = x + (w - (2 * is + gap)) / 2;
-    for (size_t i = 0; i < apps.size(); i++) {
-        int c = (int)i % 2, r = (int)i / 2;
-        float ix = x0 + c * colW, iy = y + 14 + r * 66;
-        int id = H_APP + (int)i;
+static int appSlots() { return (int)apps.size() + ((int)apps.size() < MAX_APPS ? 1 : 0); }  // atajos + hueco "Añadir"
+static int appPages() { return std::max(1, (appSlots() + APPS_PER_PAGE - 1) / APPS_PER_PAGE); }
+static void setAppPage(int p) { appPage = std::clamp(p, 0, appPages() - 1); }
+static void drawAppSlot(int i, float ix, float iy, float is, float gap, float colW, bool hitsHere) {
+    bool hs = hitsOn; hitsOn = hs && hitsHere;
+    if (i < (int)apps.size()) {
+        int id = H_APP + i;
         float k = 1 + 0.1f * hv(id) - 0.12f * prs(id);
         float s = is * k, ox = ix - (s - is) / 2, oy = iy - (s - is) / 2 - 2 * hv(id);
         if (apps[i].bmp) {
@@ -1781,10 +1782,8 @@ static void drawApps(float x, float y, float w, float h, int idx) {
         col(1, 1, 1, 0.55f + 0.4f * hv(id));
         text(apps[i].name, fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
         addHit(ix - gap / 2, iy - 4, colW, is + 22, id);
-    }
-    if (apps.size() < 6) {  // hueco libre: abre el buscador para añadir una app
-        size_t i = apps.size(); int c = (int)i % 2, r = (int)i / 2;
-        float ix = x0 + c * colW, iy = y + 14 + r * 66, hh = hv(H_APP_ADD);
+    } else {  // hueco libre: abre el buscador para añadir una app
+        float hh = hv(H_APP_ADD);
         float k = 1 + 0.06f * hh - 0.1f * prs(H_APP_ADD), s = (is - 4) * k, ox = ix + (is - s) / 2, oy = iy + (is - s) / 2;
         col(1, 1, 1, 0.05f + 0.06f * hh); fillRR(ox, oy, s, s, 10);
         col(1, 1, 1, 0.25f + 0.3f * hh);
@@ -1796,6 +1795,41 @@ static void drawApps(float x, float y, float w, float h, int idx) {
         text(L"Añadir", fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
         addHit(ix - gap / 2, iy - 4, colW, is + 22, H_APP_ADD);
     }
+    hitsOn = hs;
+}
+static void drawApps(float x, float y, float w, float h, int idx) {
+    beginCard(idx, y); card(x, y, w, h);
+    setAppPage(appPage);
+    int pages = appPages(), slots = appSlots();
+    float is = 36, gap = 12, colW = is + gap;
+    float x0 = x + (w - (2 * is + gap)) / 2, rowH = pages > 1 ? 60.f : 66.f, top = pages > 1 ? 10.f : 14.f;
+    // páginas: la actual entra deslizándose y la anterior sale por el otro lado
+    float pos = tw(19, (float)appPage, 16), ga = gA;
+    D2D1_RECT_F clip{x, y, x + w, y + h};
+    rt->PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    for (int p = 0; p < pages; p++) {
+        float d = p - pos;
+        if (fabsf(d) >= 1) continue;
+        gA = ga * (1 - fabsf(d));
+        for (int j = 0; j < APPS_PER_PAGE; j++) {
+            int i = p * APPS_PER_PAGE + j; if (i >= slots) break;
+            float ix = x0 + (j % 2) * colW + d * w, iy = y + top + (j / 2) * rowH;
+            drawAppSlot(i, ix, iy, is, gap, colW, p == appPage && fabsf(d) < 0.3f);
+        }
+    }
+    gA = ga;
+    rt->PopAxisAlignedClip();
+    // puntitos de página
+    if (pages > 1) {
+        float dy = y + h - 12, sp = 11, dx0 = x + w / 2 - (pages - 1) * sp / 2;
+        for (int p = 0; p < pages; p++) {
+            float on = clampf(1 - fabsf(p - pos), 0, 1);
+            col(1, 1, 1, 0.25f + 0.65f * on + 0.15f * hv(H_APP_PAGE + p));
+            circle(dx0 + p * sp, dy, 2.6f + 0.6f * on);
+            addHit(dx0 + p * sp - sp / 2, dy - 8, sp, 16, H_APP_PAGE + p);
+        }
+    }
+    addHit(x, y, w, h, H_APPS_CARD);  // fondo de la tarjeta: para la rueda del ratón
 }
 
 // ---------------------------------------------------------------- buscador de aplicaciones
@@ -1866,7 +1900,7 @@ static void drawSearch(float x, float y, float w, float h) {
     // texto a la derecha del campo
     std::wstring info;
     if (!sMsg.empty() && nowMs() - sMsgAt < 2500) info = sMsg;
-    else if (hoverPin >= 0) info = sPinned(sApps[sRes[hoverPin]]) ? L"Quitar de los atajos" : apps.size() >= 6 ? L"Atajos llenos (6)" : L"Añadir a los atajos";
+    else if (hoverPin >= 0) info = sPinned(sApps[sRes[hoverPin]]) ? L"Quitar de los atajos" : (int)apps.size() >= MAX_APPS ? L"Atajos llenos (36)" : L"Añadir a los atajos";
     else if (!sLoaded) info = L"Cargando...";
     else info = std::to_wstring(sRes.size()) + (sRes.size() == 1 ? L" app" : L" apps");
     col(1, 1, 1, 0.4f); text(info, fTiny, fx + fw - 190, fy, 176, fh, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -2654,6 +2688,7 @@ static void click(int id) {
     else if (id == H_CLAUDE) { setExpanded(false); launchClaude(); return; }
     else if (id == H_WIN) { if (view == V_SEARCH) view = lastTab; else startSearch(); }
     else if (id == H_APP_ADD) startSearch();
+    else if (id >= H_APP_PAGE && id < H_APP_PAGE + 10) setAppPage(id - H_APP_PAGE);
     else if (id == H_SRCH) grabFocus();
     else if (id >= H_SRCH_RES && id < H_SRCH_RES + S_COLS * S_ROWS) { sLaunch(sScroll * S_COLS + id - H_SRCH_RES); setExpanded(false); return; }
     else if (id >= H_SRCH_PIN && id < H_SRCH_PIN + S_COLS * S_ROWS) { sSel = sScroll * S_COLS + id - H_SRCH_PIN; sTogglePin(sSel); }
@@ -2870,7 +2905,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == T_TRIM) { KillTimer(h, T_TRIM); if (!expanded) trimMemory(); }
         return 0;
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, hoverId == H_SRCH ? IDC_IBEAM : (!expanded || hoverId) ? IDC_HAND : IDC_ARROW)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, hoverId == H_SRCH ? IDC_IBEAM : (!expanded || (hoverId && hoverId != H_APPS_CARD)) ? IDC_HAND : IDC_ARROW)); return TRUE; }
         break;
     case WM_MOUSEMOVE: {
         if (!hovered) {
@@ -2930,6 +2965,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LPARAM cl = MAKELPARAM(pt.x, pt.y);
         int id = hitAt(cl), d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
         if (view == V_SEARCH) { sScroll = std::clamp(sScroll + d, 0, sMaxScroll()); render(); return 0; }
+        if ((id >= H_APP && id < H_APP + 100) || id == H_APP_ADD || id == H_APPS_CARD || (id >= H_APP_PAGE && id < H_APP_PAGE + 10)) {
+            ULONGLONG n = nowMs(); static ULONGLONG lastFlip = 0;
+            if (n - lastFlip > 250) { lastFlip = n; setAppPage(appPage + d); }  // un salto por gesto en el panel táctil
+            render(); return 0;
+        }
         if (id >= H_PICK && id < H_PICK + 3 && !pomo && tmState == 0) {
             int c = id - H_PICK; auto it = tweens.find(700 + c);
             pickT[c] = roundf(it != tweens.end() ? it->second.t : pickT[c]) + d; updatePick();

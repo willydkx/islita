@@ -55,7 +55,7 @@ static const float TOPGAP = 6;                    // separación con el borde su
 static const float M = 18;                        // margen para la sombra
 
 enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES };
-enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV };
+enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
@@ -729,6 +729,9 @@ static int calY, calM;  // mes mostrado (m 1..12)
 // temporizador: 0 parado, 1 en marcha, 2 en pausa
 static int tmState = 0; static ULONGLONG tmDur = 5 * 60000, tmEnd = 0, tmLeft = 5 * 60000;
 static bool alertOn = false; static ULONGLONG alertAt = 0;
+// rayo al enchufar el cargador (unos segundos en la píldora)
+static bool chargeOn = false; static ULONGLONG chargeAt = 0; static int lastAC = -1;
+static const ULONGLONG CHARGE_MS = 3200;
 // cronómetro
 static bool swRun = false; static ULONGLONG swStart = 0, swAcc = 0; static std::vector<ULONGLONG> laps;
 // controles
@@ -784,6 +787,7 @@ static void stepTweens(float dt) {
 static float hv(int id) { return tw(100000 + id, hoverId == id ? 1.f : 0.f, 22); }
 static float prs(int id) { return tw(150000 + id, pressId == id ? 1.f : 0.f, 34); }
 static float easeOut(float t) { t = clampf(t, 0, 1); return 1 - (1 - t) * (1 - t) * (1 - t); }
+static float easeOutBack(float t) { t = clampf(t, 0, 1) - 1; return 1 + 2.70158f * t * t * t + 1.70158f * t * t; }
 static D2D1_COLOR_F mix(D2D1_COLOR_F a, D2D1_COLOR_F b, float t) { return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t}; }
 
 // ---------------------------------------------------------------- eficiencia
@@ -1170,6 +1174,10 @@ static bool runMatches(const RunApp& r, const App& a) {
 static void refreshTiles() {
     for (auto& a : apps) resolvePinned(a);
     refreshRunning();
+    for (auto it = runIcons.begin(); it != runIcons.end();) {  // solo se quedan los de las que siguen abiertas
+        bool alive = false; for (auto& r : running) if (r.key == it->first) { alive = true; break; }
+        if (alive) ++it; else { if (it->second) it->second->Release(); it = runIcons.erase(it); }
+    }
     tiles.clear();
     std::vector<bool> used(apps.size(), false);
     for (int r = 0; r < (int)running.size(); r++) {
@@ -1726,6 +1734,22 @@ static void chevron(float cx, float cy, bool right) {
 
 static const D2D1_COLOR_F RED{1.0f, 0.271f, 0.227f, 1}, GREEN{0.188f, 0.82f, 0.345f, 1}, ORANGE{1.0f, 0.624f, 0.04f, 1};
 static const D2D1_COLOR_F TOMATO{1.0f, 0.39f, 0.28f, 1};
+static ID2D1PathGeometry* boltGeo = nullptr;
+static void drawBolt(float cx, float cy, float hgt) {
+    if (!boltGeo) {
+        if (FAILED(d2d->CreatePathGeometry(&boltGeo))) { boltGeo = nullptr; return; }
+        ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(boltGeo->Open(&s))) {
+            static const D2D1_POINT_2F P[] = {{0.12f, -0.5f}, {-0.31f, 0.07f}, {-0.03f, 0.07f}, {-0.12f, 0.5f}, {0.31f, -0.08f}, {0.03f, -0.08f}};
+            s->BeginFigure(P[0], D2D1_FIGURE_BEGIN_FILLED); s->AddLines(P + 1, 5); s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            s->Close(); s->Release();
+        }
+    }
+    if (hgt <= 0.1f) return;
+    D2D1_MATRIX_3X2_F cur; rt->GetTransform(&cur);
+    D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Scale(hgt, hgt) * D2D1::Matrix3x2F::Translation(cx, cy) * *D2D1::Matrix3x2F::ReinterpretBaseType(&cur);
+    rt->SetTransform(&m); rt->FillGeometry(boltGeo, br); rt->SetTransform(&cur);
+}
 static D2D1_COLOR_F timerColor() { return !pomo ? ORANGE : (pomoPhase == 0 ? TOMATO : GREEN); }
 static D2D1_MATRIX_3X2_F mmul(const D2D1_MATRIX_3X2_F& a, const D2D1_MATRIX_3X2_F& b) {  // primero a, luego b
     return {a._11 * b._11 + a._12 * b._21, a._11 * b._12 + a._12 * b._22,
@@ -1783,7 +1807,7 @@ static void roundBtn(float cx, float cy, float r, D2D1_COLOR_F tint, float bgA, 
 }
 
 // ---------------------------------------------------------------- píldora
-enum { PM_IDLE, PM_MUSIC, PM_EVENT, PM_ALERT, PM_TIMER, PM_SW };
+enum { PM_IDLE, PM_MUSIC, PM_EVENT, PM_ALERT, PM_TIMER, PM_SW, PM_CHARGE };
 static const CalEvent* upcomingEvent(int* mins) {
     SYSTEMTIME st; GetLocalTime(&st);
     long t = daysFromCivil(st.wYear, st.wMonth, st.wDay); int now = st.wHour * 60 + st.wMinute;
@@ -1800,6 +1824,7 @@ static const CalEvent* upcomingEvent(int* mins) {
 }
 static int pillMode() {
     if (alertOn) return PM_ALERT;
+    if (chargeOn) return PM_CHARGE;
     int m = 0; const CalEvent* e = cfg.alerts ? upcomingEvent(&m) : nullptr;
     if (e && m <= 15) return PM_EVENT;
     if (tmState) return PM_TIMER;
@@ -1813,7 +1838,9 @@ static std::wstring hhmm(int m) { wchar_t b[8]; swprintf(b, 8, L"%02d:%02d", m /
 static void drawBattery(float x, float cy) {
     SYSTEM_POWER_STATUS ps; if (!GetSystemPowerStatus(&ps) || ps.BatteryFlag == 128 || ps.BatteryFlag == 255 || ps.BatteryLifePercent > 100) return;
     float pct = ps.BatteryLifePercent / 100.f; bool chg = ps.ACLineStatus == 1;
-    col(1, 1, 1, 0.9f); textN(std::to_wstring(ps.BatteryLifePercent), fSmall, x - 34, cy - 9, 30, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    std::wstring num = std::to_wstring(ps.BatteryLifePercent);
+    col(1, 1, 1, 0.9f); textN(num, fSmall, x - 34, cy - 9, 30, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    if (chg) { colC(GREEN); drawBolt(x - 4 - textWidth(num, fSmall) - 8, cy, 11); }
     col(1, 1, 1, 0.4f);
     D2D1_ROUNDED_RECT body{{x, cy - 5.5f, x + 22, cy + 5.5f}, 3.2f, 3.2f}; rt->DrawRoundedRectangle(&body, br, 1.1f, nullptr);
     fillRR(x + 23, cy - 2, 1.6f, 4, 0.8f);
@@ -1932,6 +1959,7 @@ static int volIcon() {  // 0 sin dispositivo, 1 silencio, 2..5 nivel
     return v <= 0.001f ? 2 : v < 0.34f ? 3 : v < 0.67f ? 4 : 5;
 }
 
+static bool onAC() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.ACLineStatus == 1; }
 static bool hasBattery() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100; }
 
 static void drawCollapsed(float px, float py, float pw, int mode) {
@@ -1945,6 +1973,24 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         col(0, 0, 0); glyph(L"\uE916", fIcon, px + 19, cy);
         col(1, 1, 1); text(alertPomo ? L"Pomodoro" : L"Temporizador", fTime, px + 38, cy - 10, 140, 20);
         colC(acol); text(alertPomo ? (pomoPhase == 1 ? L"Descanso" : L"A concentrarse") : L"¡Tiempo!", fTime, px + pw - 16 - 110, cy - 10, 110, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    } else if (mode == PM_CHARGE) {
+        SYSTEM_POWER_STATUS ps{}; GetSystemPowerStatus(&ps);
+        int pc = ps.BatteryLifePercent <= 100 ? ps.BatteryLifePercent : 0;
+        float t = (float)(nowMs() - chargeAt) / 1000.f;
+        float in = clampf(t / 0.45f, 0, 1), pop = easeOutBack(in);
+        float glow = 0.5f + 0.5f * sinf(t * 5.5f);
+        float bx = px + 21;
+        colC(GREEN, (0.16f + 0.2f * glow) * in); circle(bx, cy, 10.5f + 2.5f * glow * in);
+        colC(GREEN); drawBolt(bx, cy, 17 * pop);
+        col(1, 1, 1); text(L"Cargando", fTime, px + 40, cy - 10, 120, 20);
+        // la pila se rellena hasta el porcentaje de verdad
+        float fill = easeOut(clampf((t - 0.25f) / 0.9f, 0, 1)) * pc / 100.f;
+        float rx = px + pw - 16 - 28;
+        col(1, 1, 1, 0.45f);
+        D2D1_ROUNDED_RECT body{{rx, cy - 6.5f, rx + 25, cy + 6.5f}, 3.6f, 3.6f}; rt->DrawRoundedRectangle(&body, br, 1.2f, nullptr);
+        fillRR(rx + 26, cy - 2.5f, 2, 5, 1);
+        colC(GREEN); fillRR(rx + 2, cy - 4.5f, 21 * clampf(fill, 0.05f, 1), 9, 2);
+        colC(GREEN); textN(std::to_wstring((int)lroundf(fill * 100)) + L" %", fTime, rx - 8 - 70, cy - 10, 70, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (mode == PM_TIMER) {
         col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
         ULONGLONG rem = tmRemaining();
@@ -1998,7 +2044,7 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         if (!shelf.empty()) { col(1, 1, 1, 0.55f); glyph(L"", fIcon, px + 124, cy); textN(std::to_wstring(shelf.size()), fTiny, px + 134, cy - 8, 24, 16); }
         std::wstring d = std::wstring(DOW[st.wDayOfWeek]) + L" " + std::to_wstring(st.wDay) + L" " + MON[st.wMonth - 1];
         float right = px + pw - 15;
-        if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= 24 + 40; }
+        if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= 24 + 40 + (onAC() ? 10 : 0); }
         float dwid = textWidth(d, fSmall);
         col(1, 1, 1, 0.55f); text(d, fSmall, right - 90, cy - 9, 90, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
         if (caffeine) { colC(ACC()); glyph(L"\uE706", fIcon, right - dwid - 14, cy); }
@@ -2184,7 +2230,12 @@ static void drawAppSlot(int i, float ix, float iy, float is, float gap, float co
             const RunApp& r = running[t.run];
             bool act = std::find(r.wins.begin(), r.wins.end(), fgAtOpen) != r.wins.end();
             if (act) colC(ACC()); else col(1, 1, 1, 0.7f);
-            fillRR(ix + is / 2 - (act ? 4.f : 1.8f), iy + is + 2, act ? 8.f : 3.6f, 3, 1.5f);
+            int nd = std::min((int)r.wins.size(), 3);
+            if (nd <= 1) fillRR(ix + is / 2 - (act ? 4.f : 1.8f), iy + is + 2, act ? 8.f : 3.6f, 3, 1.5f);
+            else {  // varias ventanas del mismo programa: un puntito por ventana
+                float gp = 5.2f, x0 = ix + is / 2 - (nd - 1) * gp / 2;
+                for (int k = 0; k < nd; k++) fillRR(x0 + k * gp - 1.6f, iy + is + 2, 3.2f, 3, 1.5f);
+            }
         }
         col(1, 1, 1, 0.55f + 0.4f * hv(id));
         text(name, fApp, ix - gap / 2, iy + is + 5, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2806,6 +2857,7 @@ static void updateTick() {
 static int lastMode = -1;
 static int shownView = 0, prevView = 0;
 static bool discreet = false, peeking = false;  // rayita cuando hay una ventana debajo; Ctrl para ver a través  // transición solo entre la vista anterior y la nueva
+static std::vector<Hit> cacheHits;  // zonas de clic del panel dentro de la imagen
 static void buildCache() {
     if (!cacheRT) {
         D2D1_SIZE_F sz{EW, EH};
@@ -2817,10 +2869,12 @@ static void buildCache() {
     rt->BeginDraw();
     D2D1_COLOR_F clear{0, 0, 0, 0}; rt->Clear(&clear);
     D2D1_MATRIX_3X2_F I{1, 0, 0, 1, 0, 0}; rt->SetTransform(&I);
-    hitsOn = false; gOpen = 1; gA = 1; gViewA = 1;
+    hitsOn = true; gOpen = 1; gA = 1; gViewA = 1;
+    std::vector<Hit> keep; keep.swap(hits);
     drawHeader(0, 0);
     drawView(view, 0, 44);
     rt->EndDraw();
+    cacheHits.swap(hits); hits.swap(keep);
     rt = saved; hitsOn = hs; gA = ga;
     cacheValid = true;
 }
@@ -2858,6 +2912,10 @@ static void render() {
     if (alertOn && !expanded) {
         float pulse = 0.5f + 0.5f * sinf((float)(nowMs() - alertAt) / 1000.f * 6.f);
         colC(alertPomo ? timerColor() : ORANGE, 0.35f + 0.45f * pulse); rt->DrawRoundedRectangle(&pill, br, 1.5f, nullptr);
+    } else if (chargeOn && !expanded) {
+        float t = (float)(nowMs() - chargeAt) / 1000.f;
+        float fade = clampf(t / 0.3f, 0, 1) * clampf((CHARGE_MS / 1000.f - t) / 0.5f, 0, 1);
+        colC(GREEN, (0.3f + 0.35f * (0.5f + 0.5f * sinf(t * 5.5f))) * fade); rt->DrawRoundedRectangle(&pill, br, 1.5f, nullptr);
     } else {
         float dsc = clampf((CH - h) / (CH - 5), 0, 1);  // 1 = rayita
         col(1, 1, 1, 0.07f + 0.28f * dsc); rt->DrawRoundedRectangle(&pill, br, 1.0f, nullptr);
@@ -2903,6 +2961,13 @@ static void render() {
             D2D1_RECT_F d{ox, py, ox + EW, py + EH};
             if (cb) { rt->DrawBitmap(cb, &d, ae, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); cb->Release(); }
             rt->SetTransform(&I);
+            // casi abierto: ya se puede pulsar aunque el muelle siga rebotando
+            if (expanded && ae > 0.85f)
+                for (auto& hh : cacheHits) {
+                    auto X = [&](float v) { return s * (v + ox) + cx - s * cx; };
+                    auto Y = [&](float v) { return s * (v + py) + py - s * py; };
+                    hits.push_back({{X(hh.r.left), Y(hh.r.top), X(hh.r.right), Y(hh.r.bottom)}, hh.id});
+                }
         } else {
         rt->SetTransform(&base);
         gOpen = ae;
@@ -2942,8 +3007,8 @@ static void render() {
 static void collapsedTargets() {
     int mode = pillMode();
     int em = 0; bool soon = cfg.alerts && upcomingEvent(&em) && em <= 15;
-    if (discreet && !hovered && !alertOn && !soon && !peeking) { sw.t = 120; sh.t = 5; sr.t = 2.5f; return; }
-    float w = mode == PM_EVENT ? CW_EVENT : mode == PM_MUSIC ? CW_PLAY : mode == PM_ALERT ? 300.f : CW_IDLE, h = CH;
+    if (discreet && !hovered && !alertOn && !chargeOn && !soon && !peeking) { sw.t = 120; sh.t = 5; sr.t = 2.5f; return; }
+    float w = mode == PM_EVENT ? CW_EVENT : mode == PM_MUSIC ? CW_PLAY : mode == PM_ALERT ? 300.f : mode == PM_CHARGE ? 290.f : CW_IDLE, h = CH;
     if (mode == PM_IDLE && !shelf.empty()) w += 30;
     if (hovered) { w += 10; h += 3; }
     sw.t = w; sh.t = h; sr.t = h / 2;
@@ -2962,7 +3027,7 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
-        freeRunIcons(); running.clear(); tiles.clear();
+        running.clear(); tiles.clear();
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -2974,15 +3039,21 @@ static void frame() {
     step(sw, dt, k, z); step(sh, dt, k, z); step(sr, dt, k, z);
     stepTweens(dt);
     if (eqActive()) eqTime += dt;
+    if (chargeOn && nowMs() - chargeAt > CHARGE_MS) { chargeOn = false; if (!expanded) collapsedTargets(); }
     render();
-    if (springsSettled() && !tweensActive()) { animating = false; onSettled(); }
+    if (springsSettled() && !tweensActive() && !chargeOn) { animating = false; onSettled(); }
+}
+static void startCharge() {
+    if (!visible || expanded || alertOn) return;
+    chargeOn = true; chargeAt = nowMs(); lastMode = -1;
+    collapsedTargets(); startAnim();
 }
 static void setExpanded(bool e, int v = -1) {
     if (e == expanded) { if (e && v >= 0 && v != view) { view = v; if (v < V_SET) lastTab = v; render(); } return; }
     expanded = e; cacheValid = false;
     KillTimer(gHwnd, T_COLLAPSE); KillTimer(gHwnd, T_HOVER);
     if (e) {
-        gExpandedA = true;
+        gExpandedA = true; chargeOn = false;
         view = v >= 0 ? v : lastTab; if (view < V_SET) lastTab = view;
         twSnap(1, (float)(view == V_SET ? lastTab : view)); twSnap(2, 1.f); shownView = prevView = view; twSnap(5, view == V_SET ? 0.25f : 1.f); twSnap(6, view == V_SET ? 1.f : 0.f);
         SYSTEMTIME st; GetLocalTime(&st); calY = st.wYear; calM = st.wMonth; selDay = 0; twSnap(8, 0);
@@ -3561,8 +3632,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_POWERBROADCAST:
         if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) { scheduleClock(); SetEvent(gWake); }
+        {   // cargador enchufado: rayo en la píldora
+            SYSTEM_POWER_STATUS ps;
+            if (GetSystemPowerStatus(&ps) && ps.ACLineStatus <= 1) {
+                if (lastAC == 0 && ps.ACLineStatus == 1 && hasBattery()) startCharge();
+                lastAC = ps.ACLineStatus;
+            }
+        }
         if (!animating) render();
         return TRUE;
+    case WM_APP_TESTCHARGE: startCharge(); return 0;
     case WM_TIMECHANGE: scheduleClock(); if (!animating) render(); return 0;
     case WM_DISPLAYCHANGE: case WM_DPICHANGED: case WM_SETTINGCHANGE:
         if (msg == WM_DISPLAYCHANGE) gFlushes = 0;  // otra pantalla u otra frecuencia: recalcular
@@ -3632,6 +3711,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     applyTaskbar();
     RegisterPowerSettingNotification(gHwnd, &GUID_BATT, DEVICE_NOTIFY_WINDOW_HANDLE);
     RegisterPowerSettingNotification(gHwnd, &GUID_ACDC, DEVICE_NOTIFY_WINDOW_HANDLE);
+    { SYSTEM_POWER_STATUS ps; if (GetSystemPowerStatus(&ps) && ps.ACLineStatus <= 1) lastAC = ps.ACLineStatus; }
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, winEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     scheduleClock();
     SetCoalescableTimer(gHwnd, T_POLL, 1500, nullptr, 600);

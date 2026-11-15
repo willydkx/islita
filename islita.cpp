@@ -1550,6 +1550,41 @@ static float volGet(bool* mute) {
     return v;
 }
 
+// "pop" al cambiar el volumen (como en el Mac): suena al volumen nuevo, así se oye cómo de alto ha quedado.
+// Se genera una vez en memoria: un tono que baja rápido de tono (1150 -> 620 Hz) con un ataque suave y
+// una caída corta, con un armónico flojo para que suene redondo. ~0,1 s, 9 KB.
+static std::vector<BYTE> popWav;
+static void buildPop() {
+    const int sr = 44100, n = sr / 10;
+    popWav.assign(44 + n * 2, 0);
+    BYTE* b = popWav.data();
+    auto u32 = [&](int o, DWORD v) { memcpy(b + o, &v, 4); };
+    auto u16 = [&](int o, WORD v) { memcpy(b + o, &v, 2); };
+    memcpy(b, "RIFF", 4); u32(4, 36 + n * 2); memcpy(b + 8, "WAVEfmt ", 8);
+    u32(16, 16); u16(20, 1); u16(22, 1); u32(24, sr); u32(28, sr * 2); u16(32, 2); u16(34, 16);
+    memcpy(b + 36, "data", 4); u32(40, n * 2);
+    double ph = 0;
+    for (int i = 0; i < n; i++) {
+        double t = (double)i / sr;
+        double f = 620 + 530 * exp(-t * 55);           // caída de tono: "pop"
+        ph += 2 * M_PI * f / sr;
+        double env = std::min(1.0, t / 0.004) * exp(-t * 38);
+        double v = (sin(ph) + 0.22 * sin(2 * ph)) * env * 0.42;
+        short smp = (short)lround(std::clamp(v, -1.0, 1.0) * 32767);
+        memcpy(b + 44 + i * 2, &smp, 2);
+    }
+}
+static void volPop() {
+    if (alertOn) return;  // no cortar la alarma del temporizador (PlaySound es de uno en uno)
+    static ULONGLONG last = 0; ULONGLONG n = GetTickCount64();
+    if (n - last < 90) return;  // con la rueda, como mucho unos 11 por segundo
+    bool m = false; float v = volGet(&m);
+    if (m || v < 0.005f) return;
+    last = n;
+    if (popWav.empty()) buildPop();
+    PlaySoundW((LPCWSTR)popWav.data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+}
+
 // ---------------------------------------------------------------- brillo (WMI en un hilo propio, solo con la pestaña abierta)
 static std::atomic<int> briCur{-1}, briWant{-1};
 static std::atomic<bool> briQuit{false}, briAvail{true};
@@ -3597,7 +3632,7 @@ static void click(int id) {
     else if (id == H_SW_R) { if (swRun) { swAcc = swElapsed(); swRun = false; } else { swStart = nowMs(); swRun = true; } }
     else if (id == H_SW_L) { if (swRun) { laps.push_back(swElapsed()); if (laps.size() > 99) laps.erase(laps.begin()); } else { swAcc = 0; laps.clear(); } }
     else if (id == H_Q) setCaffeine(!caffeine);
-    else if (id == H_Q + 1) { volInit(); if (vol) { BOOL m = FALSE; vol->GetMute(&m); vol->SetMute(!m, nullptr); } }
+    else if (id == H_Q + 1) { volInit(); if (vol) { BOOL m = FALSE; vol->GetMute(&m); vol->SetMute(!m, nullptr); if (m) volPop(); } }
     else if (id == H_Q + 2) { setExpanded(false); ShellExecuteW(nullptr, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL); return; }
     else if (id == H_Q + 3) { setExpanded(false); LockWorkStation(); return; }
     else if (id == H_SET) { cfg.autostart = !cfg.autostart; setAutostart(cfg.autostart); }
@@ -3653,6 +3688,7 @@ static void dragEnd(LPARAM lp) {
         }
         pickT[dragCol] = cur; updatePick();
     }
+    if (dragKind == 1) volPop();
     dragKind = 0;
 }
 static void openFromPill() {
@@ -3881,6 +3917,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             pickT[c] = roundf(it != tweens.end() ? it->second.t : pickT[c]) + d; updatePick();
         } else if (id == H_VOL && vol) {
             float v = clampf(volGet(nullptr) - d * 0.05f, 0, 1); vol->SetMasterVolumeLevelScalar(v, nullptr); if (v > 0) vol->SetMute(FALSE, nullptr);
+            volPop();
         } else if (id == H_BRI && briCur >= 0) briSet(briCur - d * 5);
         render();
         return 0;

@@ -2686,9 +2686,26 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
+// Si islita se arrancó desde una terminal de Claude Code, hereda sus variables (NO_COLOR, CLAUDECODE...)
+// y el Claude que abre el botón saldría sin colores y creyéndose una sesión hija: se quitan.
+static void cleanInheritedEnv() {
+    if (!GetEnvironmentVariableW(L"CLAUDECODE", nullptr, 0)) return;
+    std::vector<std::wstring> names;
+    if (wchar_t* env = GetEnvironmentStringsW()) {
+        for (wchar_t* p = env; *p; p += wcslen(p) + 1) {
+            std::wstring kv = p; size_t eq = kv.find(L'=', 1);
+            if (eq != std::wstring::npos && _wcsnicmp(kv.c_str(), L"CLAUDE", 6) == 0) names.push_back(kv.substr(0, eq));
+        }
+        FreeEnvironmentStringsW(env);
+    }
+    names.push_back(L"NO_COLOR"); names.push_back(L"GIT_TERMINAL_PROMPT");
+    for (auto& n : names) SetEnvironmentVariableW(n.c_str(), nullptr);
+}
+
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     HANDLE mx = CreateMutexW(nullptr, TRUE, L"Local\\islita");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    cleanInheritedEnv();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
     setLowMemoryPriority();

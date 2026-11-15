@@ -2069,9 +2069,16 @@ static void render() {
         if (dsc > 0.5f) {
             // temporizador en marcha: la rayita se rellena con su color
             if (tmState && tmDur) { colC(timerColor(), 0.9f); fillRR(px + 1, py + 1, (w - 2) * (float)tmRemaining() / tmDur, h - 2, (h - 2) / 2); }
-            // zona casi invisible pero sensible desde el borde de la pantalla, para poder alcanzarla con el ratón
-            col(0, 0, 0, 0.004f); fillRR(px - 40, M - TOPGAP, w + 80, TOPGAP + h + 6, 4);
         }
+    }
+    // franja casi invisible (pero que recibe el ratón) entre el borde de arriba de la pantalla y la isla.
+    // En modo rayita sirve para alcanzarla; con el ratón encima o el panel abierto evita que, al llevar
+    // el ratón arriba del todo, la isla crea que se ha salido y se abra y se cierre en bucle.
+    if (discreet || hovered || expanded || dragKind) {
+        float dsc = clampf((CH - h) / (CH - 5), 0, 1), ext = dsc > 0.5f ? 40.f : 0.f;
+        gA = 1; col(0, 0, 0, 0.004f);
+        D2D1_RECT_F hz{px - ext, M - TOPGAP, px + w + ext, py + std::min(h, 6.f) + (dsc > 0.5f ? 6.f : 0.f)};
+        rt->FillRectangle(&hz, br);
     }
 
     D2D1_RECT_F clip{px, py, px + w, py + h};

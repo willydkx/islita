@@ -1301,12 +1301,45 @@ static void trayRefresh() {
         if (keep.count(b->first)) ++b; else { if (b->second.second) b->second.second->Release(); b = trayBmps.erase(b); }
     }
 }
+// menú de una app de segundo plano abierto: la isla deja de estar siempre encima para no taparlo
+// (muchas apps, como las de Electron, WinForms o Qt, pintan su menú en una ventana normal, no en un menú de Windows)
+static DWORD trayMenuPid = 0; static ULONGLONG trayMenuAt = 0;
+static void trayMenuBegin(DWORD pid) {
+    trayMenuPid = pid; trayMenuAt = GetTickCount64();
+    SetWindowPos(gHwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+struct PidMenu { DWORD pid; int mw, mh; bool hit; };
+// ventana emergente pequeña y visible de esa app (su menú, sea de Windows o pintado por ella)
+static BOOL CALLBACK pidMenuWin(HWND h, LPARAM lp) {
+    auto* q = (PidMenu*)lp; DWORD p = 0; GetWindowThreadProcessId(h, &p);
+    if (p != q->pid || !IsWindowVisible(h)) return TRUE;
+    LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
+    if (!(st & WS_POPUP) || (st & WS_CAPTION) == WS_CAPTION) return TRUE;
+    int cloaked = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+    RECT r; GetWindowRect(h, &r);
+    int w = r.right - r.left, hh = r.bottom - r.top;
+    if (cloaked || w < 8 || hh < 8 || w > q->mw * 6 / 10 || hh > q->mh * 9 / 10) return TRUE;
+    q->hit = true; return FALSE;
+}
+// true mientras el menú siga abierto (máximo medio minuto)
+static bool trayMenuActive() {
+    if (!trayMenuPid) return false;
+    ULONGLONG el = GetTickCount64() - trayMenuAt;
+    bool on = el < 1500;  // margen para que la app llegue a sacar el menú
+    if (!on && el < 30000) {
+        PidMenu q{trayMenuPid, (int)(mon.right - mon.left), (int)(mon.bottom - mon.top), false};
+        EnumWindows(pidMenuWin, (LPARAM)&q); on = q.hit;
+    }
+    if (!on) trayMenuPid = 0;
+    return on;
+}
 // el mismo clic que le mandaría la barra de tareas
 static void trayClick(int i, bool right) {
     if (i < 0 || i >= (int)trayList.size()) return;
     const TrayView& t = trayList[i];
     if (!IsWindow(t.hwnd) || !t.cb) return;
     DWORD pid = 0; GetWindowThreadProcessId(t.hwnd, &pid); AllowSetForegroundWindow(pid);
+    if (right) trayMenuBegin(pid);
     POINT pt; GetCursorPos(&pt);
     auto send = [&](UINT m) {
         if (t.ver >= 4) PostMessageW(t.hwnd, t.cb, MAKEWPARAM((WORD)pt.x, (WORD)pt.y), MAKELPARAM(m, t.uid));
@@ -3355,6 +3388,10 @@ static void peekTick() {
     if ((!inside || !visible) && !peeking) KillTimer(gHwnd, T_PEEK);
 }
 static void ensureTopmost() {
+    if (trayMenuPid) {
+        if (trayMenuActive()) return;
+        SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     RECT me; GetWindowRect(gHwnd, &me);
     for (HWND a = GetWindow(gHwnd, GW_HWNDPREV); a; a = GetWindow(a, GW_HWNDPREV)) {
         // cualquier ventana visible por delante (Windows a veces deja una normal encima de la isla
@@ -3828,7 +3865,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (ctxTile >= 0) { ctxTile = -1; render(); return 0; }
-            if (id >= H_TRAY && id < H_TRAY + 40) { trayClick(id - H_TRAY, true); return 0; }
+            if (id >= H_TRAY && id < H_TRAY + 40) { trayClick(id - H_TRAY, true); setExpanded(false); return 0; }
         }
         if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;

@@ -55,11 +55,11 @@ static const float TOPGAP = 6;                    // separación con el borde su
 static const float M = 18;                        // margen para la sombra
 
 enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES };
-enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE };  // TESTCHARGE: ver la animación de carga sin desenchufar
+enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
-       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR,
+       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -744,7 +744,7 @@ static int pick[3] = {0, 5, 0}; static float pickT[3] = {0, 5, 0}; static float 
 static int dragKind = 0, dragCol = -1; static float dragY0 = 0, dragPos0 = 0, dragLastY = 0, dragVel = 0; static ULONGLONG dragLastT = 0; static bool dragMoved = false;
 static D2D1_RECT_F briRect;
 // vistas del panel
-enum { V_HOME, V_TOOLS, V_SHELF, V_SET, V_SEARCH };
+enum { V_HOME, V_TOOLS, V_SHELF, V_SET, V_SEARCH, V_TRAY };
 // bandeja de archivos (se guardan rutas, no copias)
 struct ShelfItem { std::wstring path, name; ID2D1Bitmap* bmp = nullptr; bool tried = false; };
 static std::vector<ShelfItem> shelf; static std::wstring shelfFile;
@@ -875,8 +875,15 @@ static bool isTray(HWND h) {
     wchar_t c[32]; if (!GetClassNameW(h, c, 32)) return false;
     return !wcscmp(c, L"Shell_TrayWnd") || !wcscmp(c, L"Shell_SecondaryTrayWnd");
 }
+static HWND realTray() {
+    for (HWND h = nullptr; (h = FindWindowExW(nullptr, h, L"Shell_TrayWnd", nullptr));) {
+        DWORD p = 0; GetWindowThreadProcessId(h, &p);
+        if (p != GetCurrentProcessId()) return h;
+    }
+    return nullptr;
+}
 static void showTrays(bool show) {
-    HWND t = FindWindowW(L"Shell_TrayWnd", nullptr);
+    HWND t = realTray();
     if (t && (IsWindowVisible(t) != 0) != show) ShowWindow(t, show ? SW_SHOWNA : SW_HIDE);
     for (HWND s2 = nullptr; (s2 = FindWindowExW(nullptr, s2, L"Shell_SecondaryTrayWnd", nullptr));)
         if ((IsWindowVisible(s2) != 0) != show) ShowWindow(s2, show ? SW_SHOWNA : SW_HIDE);
@@ -885,7 +892,7 @@ static void CALLBACK trayShown(HWINEVENTHOOK, DWORD, HWND h, LONG obj, LONG, DWO
     if (obj == OBJID_WINDOW && cfg.hideTaskbar && h && isTray(h)) ShowWindow(h, SW_HIDE);  // Windows la ha vuelto a enseñar
 }
 static void setAutoHide(bool on) {
-    APPBARDATA ab{sizeof ab}; ab.hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+    APPBARDATA ab{sizeof ab}; ab.hWnd = realTray();
     if (!ab.hWnd) return;
     UINT st = (UINT)SHAppBarMessage(ABM_GETSTATE, &ab);
     if (((st & ABS_AUTOHIDE) != 0) == on) return;
@@ -893,7 +900,7 @@ static void setAutoHide(bool on) {
     SHAppBarMessage(ABM_SETSTATE, &ab);
 }
 static void applyTaskbar() {
-    HWND t = FindWindowW(L"Shell_TrayWnd", nullptr);
+    HWND t = realTray();
     if (trayHook) { UnhookWinEvent(trayHook); trayHook = nullptr; }
     if (cfg.hideTaskbar) {
         if (!t) return;
@@ -1140,6 +1147,152 @@ static ID2D1Bitmap* runIcon(const RunApp& r) {
     }
     runIcons[r.key] = b; return b;
 }
+
+// ---------------------------------------------------------------- apps en segundo plano (iconos de la bandeja del sistema)
+// Con la barra oculta no se llega a la flechita "^" de al lado de la hora. islita pone su propia ventana
+// "Shell_TrayWnd" por delante de la del explorador: las apps le mandan sus iconos (Shell_NotifyIcon llega como
+// WM_COPYDATA) y ella se los reenvía tal cual al explorador, así que la barra de Windows no pierde nada.
+// Al arrancar se pide a todas las apps que vuelvan a registrar sus iconos (mensaje TaskbarCreated).
+struct NID32 { DWORD cbSize, hWnd; UINT uID, uFlags, uCallbackMessage; DWORD hIcon; WCHAR szTip[128]; DWORD dwState, dwStateMask; WCHAR szInfo[256]; UINT uVersion; WCHAR szInfoTitle[64]; DWORD dwInfoFlags; GUID guidItem; DWORD hBalloonIcon; };
+struct TrayMsg { DWORD sig, msg; NID32 nid; };
+struct TrayIcon { HWND hwnd = nullptr; UINT uid = 0, cb = 0, ver = 0; bool hasGuid = false, hidden = false; GUID guid{}; HICON icon = nullptr; std::wstring tip; int gen = 0; };
+static std::mutex trayMx; static std::vector<TrayIcon> trayIcons;  // los toca el hilo de la bandeja: siempre con trayMx
+static HWND trayWnd = nullptr; static ULONGLONG trayBroadcastAt = 0; static int trayGen = 0;
+static HWND h32(DWORD v) { return (HWND)(LONG_PTR)(LONG)v; }
+static void trayParse(const COPYDATASTRUCT* cds) {
+    if (cds->cbData < offsetof(TrayMsg, nid) + offsetof(NID32, szTip)) return;
+    TrayMsg m{}; memcpy(&m, cds->lpData, std::min<size_t>(cds->cbData, sizeof m));
+    if (m.sig != 0x34753423) return;
+    NID32& n = m.nid;
+    bool g = (n.uFlags & NIF_GUID) && n.cbSize >= offsetof(NID32, hBalloonIcon);
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(trayMx);
+        auto it = std::find_if(trayIcons.begin(), trayIcons.end(), [&](const TrayIcon& t) {
+            return g ? (t.hasGuid && IsEqualGUID(t.guid, n.guidItem)) : (!t.hasGuid && t.hwnd == h32(n.hWnd) && t.uid == n.uID);
+        });
+        if (m.msg == NIM_DELETE) {
+            if (it != trayIcons.end()) { if (it->icon) DestroyIcon(it->icon); trayIcons.erase(it); changed = true; }
+        } else if (m.msg == NIM_ADD || m.msg == NIM_MODIFY || m.msg == NIM_SETVERSION) {
+            if (it == trayIcons.end() && m.msg == NIM_ADD) {
+                TrayIcon t; t.hasGuid = g; if (g) t.guid = n.guidItem; t.hwnd = h32(n.hWnd); t.uid = n.uID;
+                trayIcons.push_back(t); it = trayIcons.end() - 1;
+            }
+            if (it != trayIcons.end()) {
+                TrayIcon& t = *it;
+                if (n.hWnd) t.hwnd = h32(n.hWnd);
+                if (m.msg == NIM_SETVERSION) t.ver = n.uVersion;
+                else {
+                    if (n.uFlags & NIF_MESSAGE) t.cb = n.uCallbackMessage;
+                    if ((n.uFlags & NIF_ICON) && n.hIcon) {
+                        HICON c = CopyIcon((HICON)(LONG_PTR)(LONG)n.hIcon);
+                        if (c) { if (t.icon) DestroyIcon(t.icon); t.icon = c; t.gen = ++trayGen; }
+                    }
+                    if (n.uFlags & NIF_TIP) { n.szTip[127] = 0; t.tip = n.szTip; }
+                    if ((n.uFlags & NIF_STATE) && (n.dwStateMask & NIS_HIDDEN)) t.hidden = (n.dwState & NIS_HIDDEN) != 0;
+                }
+                changed = true;
+            }
+        }
+    }
+    if (changed && gHwnd) PostMessageW(gHwnd, WM_APP_TRAY, 0, 0);
+}
+static void trayTopmost() { if (trayWnd) SetWindowPos(trayWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+static void trayBroadcast() { trayBroadcastAt = GetTickCount64(); if (WM_TASKBARCREATED) SendNotifyMessageW(HWND_BROADCAST, WM_TASKBARCREATED, 0, 0); }
+static LRESULT CALLBACK TrayProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COPYDATA) {  // iconos (dwData 1) y avisos de barras (0, 3...): todo sigue llegando al explorador
+        auto* cds = (const COPYDATASTRUCT*)lp;
+        if (cds && cds->dwData == 1 && cds->lpData) trayParse(cds);
+        HWND t = realTray(); DWORD_PTR r = 0;
+        if (t && !SendMessageTimeoutW(t, msg, wp, lp, SMTO_ABORTIFHUNG, 4000, &r)) r = 0;
+        return t ? (LRESULT)r : (cds && cds->dwData == 1);
+    }
+    if (msg == WM_TASKBARCREATED && WM_TASKBARCREATED) {  // el explorador se ha reiniciado: volver a ponerse delante y pedir los iconos
+        if (GetTickCount64() - trayBroadcastAt > 10000) SetTimer(h, 1, 2500, nullptr);
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == 1) { KillTimer(h, 1); trayTopmost(); trayBroadcast(); return 0; }
+    if (msg == WM_COMMAND || (msg >= WM_USER && msg < WM_APP)) {  // otros mensajes para la barra: al explorador
+        HWND t = realTray(); DWORD_PTR r = 0;
+        if (t) SendMessageTimeoutW(t, msg, wp, lp, SMTO_ABORTIFHUNG, 2000, &r);
+        return (LRESULT)r;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+static void trayThread() {
+    WNDCLASSW wc{}; wc.lpfnWndProc = TrayProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"Shell_TrayWnd";
+    RegisterClassW(&wc);
+    trayWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"Shell_TrayWnd", L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!trayWnd) return;
+    ChangeWindowMessageFilterEx(trayWnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    if (WM_TASKBARCREATED) ChangeWindowMessageFilterEx(trayWnd, WM_TASKBARCREATED, MSGFLT_ALLOW, nullptr);
+    trayTopmost(); trayBroadcast();
+    MSG m; while (GetMessageW(&m, nullptr, 0, 0) > 0) DispatchMessageW(&m);
+}
+// lado de la isla (hilo de la interfaz)
+struct TrayView { std::wstring key, name; HWND hwnd; UINT uid, cb, ver; };
+static std::vector<TrayView> trayList; static std::map<std::wstring, std::pair<int, ID2D1Bitmap*>> trayBmps;
+static void freeTrayBmps() { for (auto& b : trayBmps) if (b.second.second) b.second.second->Release(); trayBmps.clear(); }
+static int iconWidth(HICON h) {
+    ICONINFO ii{}; if (!GetIconInfo(h, &ii)) return 0;
+    BITMAP bm{}; GetObjectW(ii.hbmColor ? ii.hbmColor : ii.hbmMask, sizeof bm, &bm);
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    return bm.bmWidth;
+}
+static void trayRefresh() {
+    trayList.clear();
+    UINT px = (UINT)lroundf(32 * scale);
+    std::set<std::wstring> keep;
+    std::lock_guard<std::mutex> lk(trayMx);
+    for (auto it = trayIcons.begin(); it != trayIcons.end();) {
+        if (!IsWindow(it->hwnd)) { if (it->icon) DestroyIcon(it->icon); it = trayIcons.erase(it); continue; }
+        if (it->hidden || !it->icon) { ++it; continue; }
+        TrayView v; v.hwnd = it->hwnd; v.uid = it->uid; v.cb = it->cb; v.ver = it->ver;
+        wchar_t k[64];
+        if (it->hasGuid) StringFromGUID2(it->guid, k, 64); else swprintf(k, 64, L"%p:%u", (void*)it->hwnd, it->uid);
+        v.key = k;
+        DWORD pid = 0; GetWindowThreadProcessId(it->hwnd, &pid);
+        std::wstring exe = exeOfPid(pid), tip = it->tip;
+        size_t nl = tip.find_first_of(L"\r\n"); if (nl != std::wstring::npos) tip.resize(nl);
+        v.name = trim(tip);
+        if (v.name.empty() && !exe.empty()) v.name = exeDescription(exe);
+        auto b = trayBmps.find(v.key);
+        if (b == trayBmps.end() || b->second.first != it->gen) {
+            if (b != trayBmps.end() && b->second.second) b->second.second->Release();
+            ID2D1Bitmap* bmp = nullptr;
+            // los iconos de la bandeja suelen ser de 16 px: si es pequeño, mejor el del programa (más nítido)
+            if (iconWidth(it->icon) < (int)px && !exe.empty() && !endsWithI(exe, L"\\explorer.exe")) {  // los del explorador (Bluetooth, sonido...) con su propio icono
+                HICON hi = iconFor(exe, SHIL_JUMBO);
+                if (hi) { bmp = bitmapFromIcon(hi, px, true); DestroyIcon(hi); }
+                if (!bmp && (hi = iconFor(exe, SHIL_EXTRALARGE))) { bmp = bitmapFromIcon(hi, px, false); DestroyIcon(hi); }
+            }
+            if (!bmp) bmp = bitmapFromIcon(it->icon, px, false);
+            trayBmps[v.key] = {it->gen, bmp};
+        }
+        keep.insert(v.key);
+        trayList.push_back(v);
+        ++it;
+    }
+    for (auto b = trayBmps.begin(); b != trayBmps.end();) {
+        if (keep.count(b->first)) ++b; else { if (b->second.second) b->second.second->Release(); b = trayBmps.erase(b); }
+    }
+}
+// el mismo clic que le mandaría la barra de tareas
+static void trayClick(int i, bool right) {
+    if (i < 0 || i >= (int)trayList.size()) return;
+    const TrayView& t = trayList[i];
+    if (!IsWindow(t.hwnd) || !t.cb) return;
+    DWORD pid = 0; GetWindowThreadProcessId(t.hwnd, &pid); AllowSetForegroundWindow(pid);
+    POINT pt; GetCursorPos(&pt);
+    auto send = [&](UINT m) {
+        if (t.ver >= 4) PostMessageW(t.hwnd, t.cb, MAKEWPARAM((WORD)pt.x, (WORD)pt.y), MAKELPARAM(m, t.uid));
+        else PostMessageW(t.hwnd, t.cb, t.uid, m);
+    };
+    if (right) { send(WM_RBUTTONDOWN); send(WM_RBUTTONUP); if (t.ver >= 3) send(WM_CONTEXTMENU); }
+    else { send(WM_LBUTTONDOWN); send(WM_LBUTTONUP); if (t.ver >= 3) send(WM_USER + 0 /* NIN_SELECT */); }
+}
+
 // qué programa abre cada atajo, para reconocerlo cuando está abierto
 static void resolvePinned(App& a) {
     if (a.resolved) return;
@@ -2796,14 +2949,50 @@ static void drawHeader(float ox, float oy) {
     col(1, 1, 1, 0.08f + 0.08f * wh + 0.12f * won); circle(wx, gcy, 13 * kw);
     winLogo(wx, gcy, 11 * kw, mix(WINBLUE, {1, 1, 1, 1}, 0.15f * wh));
     addHit(wx - 14, gcy - 14, 28, 28, H_WIN);
-    float lx = wx - 20 - 90;
+    // apps en segundo plano (la flechita de la bandeja)
+    float yx = wx - 34, yh = hv(H_TRAYBTN), ky = 1 - 0.1f * prs(H_TRAYBTN), yon = tw(21, view == V_TRAY ? 1.f : 0.f, 14);
+    col(1, 1, 1, 0.08f + 0.08f * yh + 0.12f * yon); circle(yx, gcy, 13 * ky);
+    col(1, 1, 1, 0.8f + 0.2f * std::max(yh, yon)); glyph(L"\uE70E", fIcon, yx, gcy - 1);
+    addHit(yx - 14, gcy - 14, 28, 28, H_TRAYBTN);
+    float lx = yx - 20 - 90;
     if (ch > 0.01f) { col(1, 1, 1, 0.75f * ch); text(L"Claude Code", fTiny, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING); }
     else if (wh > 0.01f) { col(1, 1, 1, 0.75f * wh); text(L"Buscar apps", fTiny, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING); }
+    else if (yh > 0.01f) { col(1, 1, 1, 0.75f * yh); text(L"Segundo plano", fTiny, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING); }
     // temporizador en marcha visible desde cualquier pestaña
     else if (tmState == 1 && view != 1) {
         colC(timerColor()); textN(fmtClock(tmRemaining(), true), fTab, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (swRun && view != 1) {
         colC(ORANGE); textN(fmtClock(swElapsed(), false), fTab, lx, hy, 90, hh, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+}
+static void drawTray(float x, float y, float w, float h) {
+    beginCard(0, y); card(x, y, w, h);
+    const wchar_t* ttl = L"Segundo plano";
+    col(1, 1, 1, 0.5f); text(ttl, fCalHead, x + 16, y + 12, 140, 18);
+    if (!trayList.empty()) {
+        col(1, 1, 1, 0.35f); textN(std::to_wstring(trayList.size()) + (trayList.size() == 1 ? L" app" : L" apps"), fTiny, x + 16 + textWidth(ttl, fCalHead) + 8, y + 12, 120, 18);
+        col(1, 1, 1, 0.3f); text(L"Clic derecho: menú de la app", fTiny, x + w - 14 - 240, y + 12, 240, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    } else {
+        col(1, 1, 1, 0.4f); text(L"Ninguna app en segundo plano", fSmall, x, y + h / 2 - 10, w, 20, DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    const float tw_ = 82, th = 74, gap = 4;
+    int cols = (int)((w - 28 + gap) / (tw_ + gap));
+    float x0 = x + 14 + ((w - 28) - (cols * tw_ + (cols - 1) * gap)) / 2, y0 = y + 40;
+    int show = std::min((int)trayList.size(), cols * 2);
+    for (int i = 0; i < show; i++) {
+        const TrayView& t = trayList[i];
+        float tx = x0 + (i % cols) * (tw_ + gap), ty = y0 + (i / cols) * (th + gap);
+        int id = H_TRAY + i; float hh = hv(id), pp = prs(id);
+        col(1, 1, 1, 0.07f * hh + 0.05f * pp); fillRR(tx, ty, tw_, th, 12);
+        float s = 32 * (1 - 0.06f * pp), cx = tx + tw_ / 2, cy = ty + 8 + 18;
+        auto b = trayBmps.find(t.key);
+        if (b != trayBmps.end() && b->second.second) {
+            D2D1_RECT_F d{cx - s / 2, cy - s / 2, cx + s / 2, cy + s / 2};
+            rt->DrawBitmap(b->second.second, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+        } else { col(1, 1, 1, 0.4f); circle(cx, cy, 10); }
+        col(1, 1, 1, 0.55f + 0.4f * hh); text(t.name, fTiny, tx + 4, ty + th - 24, tw_ - 8, 16, DWRITE_TEXT_ALIGNMENT_CENTER);
+        addHit(tx, ty, tw_, th, id);
     }
 }
 static void drawView(int v, float ox, float y) {
@@ -2822,6 +3011,8 @@ static void drawView(int v, float ox, float y) {
         drawShelf(x, y, EW - 24, h);
     } else if (v == V_SEARCH) {
         drawSearch(x, y, EW - 24, h);
+    } else if (v == V_TRAY) {
+        drawTray(x, y, EW - 24, h);
     } else {
         drawGeneral(x, y, 250, h, 0); x += 260;
         drawCalSettings(x, y, 210, h, 1); x += 220;
@@ -3027,7 +3218,7 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
-        running.clear(); tiles.clear();
+        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps();
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -3238,6 +3429,8 @@ static void click(int id) {
     }
     else if (id == H_CLAUDE) { setExpanded(false); launchClaude(); return; }
     else if (id == H_WIN) { if (view == V_SEARCH) view = lastTab; else startSearch(); }
+    else if (id == H_TRAYBTN) { if (view == V_TRAY) view = lastTab; else { trayRefresh(); view = V_TRAY; } }
+    else if (id >= H_TRAY && id < H_TRAY + 40) trayClick(id - H_TRAY, false);
     else if (id == H_APP_ADD) startSearch();
     else if (id >= H_APP_PAGE && id < H_APP_PAGE + 10) setAppPage(id - H_APP_PAGE);
     else if (id == H_SRCH) grabFocus();
@@ -3449,6 +3642,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (wp == T_CLOCK) { scheduleClock(); if (!expanded) collapsedTargets(); if (!animating) render(); }
         else if (wp == T_POLL) {
             if (cfg.hideTaskbar) showTrays(false);  // por si se escapó algún aviso
+            if (trayWnd && FindWindowW(L"Shell_TrayWnd", nullptr) != trayWnd) trayTopmost();  // los iconos tienen que seguir llegando a islita
             checkFullscreen();
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
@@ -3605,6 +3799,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (ctxTile >= 0) { ctxTile = -1; render(); return 0; }
+            if (id >= H_TRAY && id < H_TRAY + 40) { trayClick(id - H_TRAY, true); return 0; }
         }
         if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
@@ -3642,6 +3837,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (!animating) render();
         return TRUE;
     case WM_APP_TESTCHARGE: startCharge(); return 0;
+    case WM_APP_TRAY:
+        if (expanded && view == V_TRAY) { trayRefresh(); cacheValid = false; if (!animating) render(); }
+        return 0;
     case WM_TIMECHANGE: scheduleClock(); if (!animating) render(); return 0;
     case WM_DISPLAYCHANGE: case WM_DPICHANGED: case WM_SETTINGCHANGE:
         if (msg == WM_DISPLAYCHANGE) gFlushes = 0;  // otra pantalla u otra frecuencia: recalcular
@@ -3712,6 +3910,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     RegisterPowerSettingNotification(gHwnd, &GUID_BATT, DEVICE_NOTIFY_WINDOW_HANDLE);
     RegisterPowerSettingNotification(gHwnd, &GUID_ACDC, DEVICE_NOTIFY_WINDOW_HANDLE);
     { SYSTEM_POWER_STATUS ps; if (GetSystemPowerStatus(&ps) && ps.ACLineStatus <= 1) lastAC = ps.ACLineStatus; }
+    std::thread(trayThread).detach();
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, winEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     scheduleClock();
     SetCoalescableTimer(gHwnd, T_POLL, 1500, nullptr, 600);

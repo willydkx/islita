@@ -265,13 +265,66 @@ static void pollMedia() {
 }
 
 // ------------- sensores (solo con el panel abierto; se cierran al plegar)
-typedef int (*nvInit_t)(); typedef int (*nvShut_t)();
-typedef int (*nvHandle_t)(unsigned, void**);
-typedef int (*nvTemp_t)(void*, int, unsigned*);
-struct nvUtil { unsigned gpu, mem; };
-typedef int (*nvUtil_t)(void*, nvUtil*);
-static HMODULE nv = nullptr; static void* nvDev = nullptr;
-static nvTemp_t nvTemp; static nvUtil_t nvUtilF; static nvShut_t nvShut;
+// GPU por D3DKMT (gdi32), como el Administrador de tareas: < 1 MB, frente a los ~19 MB que dejaba nvml.dll
+namespace kmt {
+typedef UINT HND;
+struct AdapterInfo { HND hAdapter; LUID luid; ULONG sources; BOOL precise; };
+struct EnumAdapters2 { ULONG n; AdapterInfo* p; };
+struct QueryInfo { HND hAdapter; int type; void* data; UINT size; };
+struct PerfData { UINT32 phys; ULONGLONG memFreq, maxMemFreq, maxMemFreqOC, memBw, pcieBw; ULONG fanRPM, power, temperature; UCHAR pso; };
+struct RegInfo { WCHAR adapter[MAX_PATH], bios[MAX_PATH], dac[MAX_PATH], chip[MAX_PATH]; };
+struct CloseAdapter { HND hAdapter; };
+typedef LONG(WINAPI* fnEnum2)(EnumAdapters2*);
+typedef LONG(WINAPI* fnQAI)(QueryInfo*);
+typedef LONG(WINAPI* fnQS)(void*);
+typedef LONG(WINAPI* fnClose)(CloseAdapter*);
+static fnQAI qai; static fnQS qs; static fnClose closeA;
+static bool ok = false; static HND hGpu = 0; static LUID luid{}; static ULONG nodes = 0;
+static std::vector<ULONGLONG> lastRun; static ULONGLONG lastAt = 0;
+// D3DKMT_QUERYSTATISTICS: tipo (0 adaptador, 5 nodo) en 0, LUID en 4, resultado en 24, NodeId en 800
+static bool stats(int type, ULONG node, BYTE (&b)[1024]) {
+    memset(b, 0, sizeof b); *(int*)b = type; memcpy(b + 4, &luid, 8); *(ULONG*)(b + 800) = node;
+    return qs(b) == 0;
+}
+static void open() {
+    HMODULE g = GetModuleHandleW(L"gdi32.dll");
+    auto en = (fnEnum2)GetProcAddress(g, "D3DKMTEnumAdapters2");
+    qai = (fnQAI)GetProcAddress(g, "D3DKMTQueryAdapterInfo"); qs = (fnQS)GetProcAddress(g, "D3DKMTQueryStatistics");
+    closeA = (fnClose)GetProcAddress(g, "D3DKMTCloseAdapter");
+    if (!en || !qai || !qs) return;
+    AdapterInfo ad[16]; EnumAdapters2 e{16, ad};
+    if (en(&e) != 0) return;
+    int best = 0;
+    for (ULONG i = 0; i < e.n && i < 16; i++) {  // la gráfica dedicada: NVIDIA > AMD/Intel con sensor
+        RegInfo ri{}; QueryInfo q{ad[i].hAdapter, 8 /*registro*/, &ri, sizeof ri};
+        PerfData pd{}; QueryInfo q2{ad[i].hAdapter, 62 /*perf*/, &pd, sizeof pd};
+        if (qai(&q) != 0 || qai(&q2) != 0) continue;
+        int sc = wcsstr(ri.adapter, L"NVIDIA") ? 3 : (wcsstr(ri.adapter, L" RX") || wcsstr(ri.adapter, L"Arc")) ? 2 : 1;
+        if (sc > best) { best = sc; hGpu = ad[i].hAdapter; luid = ad[i].luid; }
+    }
+    for (ULONG i = 0; i < e.n && i < 16; i++) if (closeA && ad[i].hAdapter != hGpu) { CloseAdapter c{ad[i].hAdapter}; closeA(&c); }
+    if (!best) return;
+    BYTE b[1024];
+    nodes = stats(0, 0, b) ? std::min<ULONG>(*(ULONG*)(b + 28), 64) : 0;
+    lastRun.assign(nodes, 0); lastAt = 0; ok = true;
+}
+static void close() { if (ok && closeA) { CloseAdapter c{hGpu}; closeA(&c); } ok = false; hGpu = 0; nodes = 0; lastRun.clear(); }
+static void poll(float& temp, float& use) {
+    if (!ok) return;
+    PerfData pd{}; QueryInfo q{hGpu, 62, &pd, sizeof pd};
+    if (qai(&q) == 0 && pd.temperature > 0) temp = pd.temperature / 10.f;  // 0 = gráfica dormida
+    // uso = el motor más ocupado (tiempo de ejecución en unidades de 100 ns)
+    ULONGLONG now = GetTickCount64() * 10000, busiest = 0; BYTE b[1024];
+    for (ULONG n = 0; n < nodes; n++) {
+        if (!stats(5, n, b)) continue;
+        ULONGLONG r = *(ULONGLONG*)(b + 24);
+        if (lastAt && r >= lastRun[n]) busiest = std::max(busiest, r - lastRun[n]);
+        lastRun[n] = r;
+    }
+    if (lastAt && now > lastAt) use = std::min(100.f, 100.f * (float)busiest / (float)(now - lastAt));
+    lastAt = now;
+}
+}
 static PDH_HQUERY pq = nullptr; static PDH_HCOUNTER pc = nullptr;
 static ULONGLONG lastIdle = 0, lastTotal = 0;
 static bool sensorsOpen = false;
@@ -285,23 +338,14 @@ static void openSensors() {
         if (PdhAddEnglishCounterW(pq, L"\\Thermal Zone Information(*)\\High Precision Temperature", 0, &pc) != ERROR_SUCCESS) pc = nullptr;
         PdhCollectQueryData(pq);
     }
-    nv = LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!nv) nv = LoadLibraryW(L"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
-    if (nv) {
-        auto init = (nvInit_t)GetProcAddress(nv, "nvmlInit_v2");
-        auto hnd = (nvHandle_t)GetProcAddress(nv, "nvmlDeviceGetHandleByIndex_v2");
-        nvTemp = (nvTemp_t)GetProcAddress(nv, "nvmlDeviceGetTemperature");
-        nvUtilF = (nvUtil_t)GetProcAddress(nv, "nvmlDeviceGetUtilizationRates");
-        nvShut = (nvShut_t)GetProcAddress(nv, "nvmlShutdown");
-        if (!(init && hnd && nvTemp && init() == 0 && hnd(0, &nvDev) == 0)) { nvDev = nullptr; }
-    }
+    kmt::open();
     FILETIME i, k, u; GetSystemTimes(&i, &k, &u); lastIdle = ft(i); lastTotal = ft(k) + ft(u);
 }
 static void closeSensors() {
     if (!sensorsOpen) return;
     sensorsOpen = false;
     if (pq) { PdhCloseQuery(pq); pq = nullptr; pc = nullptr; }
-    if (nv) { if (nvDev && nvShut) nvShut(); FreeLibrary(nv); nv = nullptr; nvDev = nullptr; }
+    kmt::close();
 }
 static void pollStats() {
     StatsInfo s;
@@ -323,10 +367,7 @@ static void pollStats() {
                 }
         }
     }
-    if (nvDev) {
-        unsigned t = 0; if (nvTemp(nvDev, 0, &t) == 0) s.gpuT = (float)t;
-        nvUtil ut{}; if (nvUtilF && nvUtilF(nvDev, &ut) == 0) s.gpuU = (float)ut.gpu;
-    }
+    kmt::poll(s.gpuT, s.gpuU);
     { std::lock_guard<std::mutex> lk(gMx); gStatsShared = s; }
     PostMessage(gHwnd, WM_APP_STATS, 0, 0);
 }

@@ -31,7 +31,9 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.
-  - Volumen, brillo y accesos rápidos: cafeína (que no se apague la pantalla), silencio, captura de pantalla y bloquear.
+  - Volumen y brillo. Al cambiar el volumen suena un "pop" corto con el volumen nuevo. La flechita de la derecha del volumen elige la salida de sonido (altavoces, cascos, monitor...), como en la barra de tareas.
+  - Wi-Fi y Bluetooth, como en el panel rápido de Windows: pulsar los enciende o apaga y la flechita abre la lista. En la de wifi te conectas a las redes guardadas con un clic (las nuevas abren el panel de Windows para la contraseña). En la de Bluetooth, los cascos y altavoces emparejados se conectan y desconectan con un clic.
+  - Accesos rápidos: cafeína (que no se apague la pantalla), silencio, captura de pantalla y bloquear.
 - **Bandeja**
   - Arrastra archivos encima de la isla y quedan guardados para soltarlos después en otra carpeta o en una web.
   - Al sacarlos se copian; el original nunca se mueve.
@@ -42,7 +44,7 @@ En la cabecera hay un botón con el **logo de Windows** que abre el buscador de 
 - Clic o **Enter** para abrirla. Flechas para moverte, **Esc** para borrar o salir.
 - El **+** de cada resultado (o **Ctrl+Enter**) la añade a los atajos de Inicio; si ya está, sale un check y al pulsarlo se quita.
 
-Al lado está la flechita de **Segundo plano**: los iconos de las apps que siguen abiertas sin ventana (los de la flechita que hay junto a la hora en la barra de tareas), para cuando la barra está oculta. Clic para abrir la app y clic derecho para su menú, igual que en la barra. islita los recoge sin quitárselos a Windows: la barra de tareas los sigue teniendo todos.
+Al lado está la flechita de **Segundo plano**: los iconos de las apps que siguen abiertas sin ventana (los de la flechita que hay junto a la hora en la barra de tareas), para cuando la barra está oculta. Clic para abrir la app y clic derecho para su menú, igual que en la barra (la isla se aparta para que el menú quede siempre encima). islita los recoge sin quitárselos a Windows: la barra de tareas los sigue teniendo todos.
 
 También está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
 

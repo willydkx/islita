@@ -11,6 +11,8 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <wlanapi.h>
+#include <setupapi.h>
+#include <bluetoothapis.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
@@ -54,12 +56,12 @@ static const float CW_IDLE = 276, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
-enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES };
-enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY };  // TESTCHARGE: ver la animación de carga sin desenchufar
+enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES, T_BTLIST };
+enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY, WM_APP_BTLIST };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
-       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK,
+       H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK, H_NET_BTN, H_BT_BTN, H_NET_MORE, H_BT_MORE, H_NET_DISC,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950, H_NET = 1000, H_BT = 1030 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -2157,6 +2159,7 @@ static HANDLE wlanH = nullptr;
 static std::atomic<int> wifiBarsSeen{-1};
 static int barsOf(ULONG q) { return q >= 75 ? 4 : q >= 50 ? 3 : q >= 25 ? 2 : 1; }
 // Windows avisa de cada escaneo y de cada cambio de señal: solo se despierta a la isla si cambia algo visible
+static std::atomic<bool> gWifiListOpen{false};
 static void CALLBACK wlanNotify(PWLAN_NOTIFICATION_DATA d, PVOID) {
     if (d->NotificationSource == WLAN_NOTIFICATION_SOURCE_MSM) {
         if (d->NotificationCode == wlan_notification_msm_signal_quality_change && d->pData && d->dwDataSize >= sizeof(ULONG)) {
@@ -2169,6 +2172,7 @@ static void CALLBACK wlanNotify(PWLAN_NOTIFICATION_DATA d, PVOID) {
         switch (d->NotificationCode) {
         case wlan_notification_acm_connection_complete: case wlan_notification_acm_disconnected:
         case wlan_notification_acm_interface_arrival: case wlan_notification_acm_interface_removal: break;
+        case wlan_notification_acm_scan_complete: case wlan_notification_acm_scan_fail: if (!gWifiListOpen) return; break;
         default: return;
         }
     }
@@ -2212,6 +2216,116 @@ static void netInit() {
     HANDLE nh = nullptr; NotifyIpInterfaceChange(AF_UNSPEC, ipChange, nullptr, FALSE, &nh);
     refreshNet();
 }
+
+// ---------------------------------------------------------------- wifi y bluetooth (listas en Controles, como en la barra de tareas)
+static bool wifiOpen = false, btOpen = false; static int listScroll = 0;
+struct WNet { std::wstring ssid, profile; int q = 0; bool sec = false, conn = false, prof = false; DOT11_BSS_TYPE bss = dot11_BSS_type_infrastructure; };
+static std::vector<WNet> nets; static std::wstring netBusy; static ULONGLONG netBusyAt = 0;  // red a la que se está conectando
+static bool wifiGuid(GUID* g) {
+    PWLAN_INTERFACE_INFO_LIST l = nullptr; bool ok = false;
+    if (wlanH && WlanEnumInterfaces(wlanH, nullptr, &l) == ERROR_SUCCESS) {
+        if (l->dwNumberOfItems) { *g = l->InterfaceInfo[0].InterfaceGuid; ok = true; }
+        WlanFreeMemory(l);
+    }
+    return ok;
+}
+static std::wstring ssidStr(const DOT11_SSID& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, (const char*)s.ucSSID, (int)s.uSSIDLength, nullptr, 0);
+    std::wstring w(n, 0); if (n) MultiByteToWideChar(CP_UTF8, 0, (const char*)s.ucSSID, (int)s.uSSIDLength, &w[0], n);
+    return w;
+}
+static void netList() {
+    nets.clear(); GUID g; if (!wifiGuid(&g)) return;
+    PWLAN_AVAILABLE_NETWORK_LIST nl = nullptr;
+    if (WlanGetAvailableNetworkList(wlanH, &g, 0, nullptr, &nl) != ERROR_SUCCESS) return;
+    for (DWORD i = 0; i < nl->dwNumberOfItems; i++) {  // una fila por nombre de red (Windows repite la que tiene perfil guardado)
+        const WLAN_AVAILABLE_NETWORK& a = nl->Network[i];
+        std::wstring ss = ssidStr(a.dot11Ssid); if (ss.empty()) continue;
+        auto it = std::find_if(nets.begin(), nets.end(), [&](const WNet& n) { return n.ssid == ss; });
+        if (it == nets.end()) { nets.push_back(WNet()); it = nets.end() - 1; it->ssid = ss; it->bss = a.dot11BssType; }
+        it->q = std::max(it->q, (int)a.wlanSignalQuality);
+        it->sec = it->sec || a.bSecurityEnabled;
+        bool c = (a.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0;
+        if (c) it->conn = true;
+        if ((a.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) && a.strProfileName[0] && (it->profile.empty() || c)) { it->prof = true; it->profile = a.strProfileName; }
+    }
+    WlanFreeMemory(nl);
+    std::stable_sort(nets.begin(), nets.end(), [](const WNet& a, const WNet& b) { if (a.conn != b.conn) return a.conn; if (a.prof != b.prof) return a.prof; return a.q > b.q; });
+    for (auto& n : nets) if (n.conn && n.ssid == netBusy) netBusy.clear();
+    if (!netBusy.empty() && GetTickCount64() - netBusyAt > 20000) netBusy.clear();
+}
+static void netScan() { GUID g; if (wifiGuid(&g)) WlanScan(wlanH, &g, nullptr, nullptr, nullptr); }
+// false si hay que pedir la contraseña: eso lo hace el panel de redes de Windows
+static bool netConnect(int i) {
+    if (i < 0 || i >= (int)nets.size() || nets[i].conn) return true;
+    WNet& n = nets[i];
+    if (!n.prof) { ShellExecuteW(nullptr, L"open", L"ms-availablenetworks:", nullptr, nullptr, SW_SHOWNORMAL); return false; }
+    GUID g; if (!wifiGuid(&g)) return true;
+    WLAN_CONNECTION_PARAMETERS cp{}; cp.wlanConnectionMode = wlan_connection_mode_profile; cp.strProfile = n.profile.c_str(); cp.dot11BssType = n.bss;
+    if (WlanConnect(wlanH, &g, &cp, nullptr) == ERROR_SUCCESS) { netBusy = n.ssid; netBusyAt = GetTickCount64(); }
+    return true;
+}
+static void netDisconnect() { GUID g; if (wifiGuid(&g)) WlanDisconnect(wlanH, &g, nullptr); }
+
+// Bluetooth: los emparejados. Los de audio se conectan y desconectan como el botón "Conectar" de Configuración:
+// pidiéndoselo al controlador de audio Bluetooth del dispositivo (propiedad "oneshot reconnect / disconnect").
+static const GUID KSCATEGORY_AUDIO_ = {0x6994AD04, 0x93EF, 0x11D0, {0xA3, 0xCC, 0x00, 0xA0, 0xC9, 0x22, 0x31, 0x96}};
+static const GUID KSPROPSETID_BtAudio_ = {0x7fa06c40, 0xb8f6, 0x4c7e, {0x85, 0x56, 0xe8, 0xc3, 0x3a, 0x12, 0xe5, 0x4d}};
+struct BtDev { std::wstring name, ks; ULONGLONG addr = 0; ULONG cod = 0; bool conn = false; };
+static std::vector<BtDev> bts; static ULONGLONG btBusy = 0, btBusyAt = 0; static bool btWant = false;
+static void btList() {
+    bts.clear();
+    BLUETOOTH_DEVICE_SEARCH_PARAMS sp{}; sp.dwSize = sizeof sp;
+    sp.fReturnAuthenticated = TRUE; sp.fReturnRemembered = TRUE; sp.fReturnConnected = TRUE;
+    BLUETOOTH_DEVICE_INFO di{}; di.dwSize = sizeof di;
+    if (HBLUETOOTH_DEVICE_FIND f = BluetoothFindFirstDevice(&sp, &di)) {
+        do {
+            BtDev d; d.name = di.szName; d.addr = di.Address.ullLong; d.cod = di.ulClassofDevice; d.conn = di.fConnected != FALSE;
+            if (!d.name.empty()) bts.push_back(d);
+            di = BLUETOOTH_DEVICE_INFO{}; di.dwSize = sizeof di;
+        } while (BluetoothFindNextDevice(f, &di));
+        BluetoothFindDeviceClose(f);
+    }
+    // controlador de audio (A2DP) de cada uno, por su dirección en la ruta
+    HDEVINFO hd = SetupDiGetClassDevsW(&KSCATEGORY_AUDIO_, nullptr, nullptr, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
+    if (hd != INVALID_HANDLE_VALUE) {
+        SP_DEVICE_INTERFACE_DATA id{}; id.cbSize = sizeof id;
+        for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hd, nullptr, &KSCATEGORY_AUDIO_, i, &id); i++) {
+            DWORD need = 0; SetupDiGetDeviceInterfaceDetailW(hd, &id, nullptr, 0, &need, nullptr);
+            if (need < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) continue;
+            std::vector<BYTE> buf(need); auto* det = (SP_DEVICE_INTERFACE_DETAIL_DATA_W*)buf.data(); det->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+            if (!SetupDiGetDeviceInterfaceDetailW(hd, &id, det, need, nullptr, nullptr)) continue;
+            std::wstring path = det->DevicePath, lo = lowerW(path);
+            if (lo.find(L"bthenum#{0000110b") == std::wstring::npos) continue;
+            for (auto& d : bts) { wchar_t a[24]; swprintf(a, 24, L"&%012llx_", d.addr); if (d.ks.empty() && lo.find(a) != std::wstring::npos) d.ks = path; }
+        }
+        SetupDiDestroyDeviceInfoList(hd);
+    }
+    std::stable_sort(bts.begin(), bts.end(), [](const BtDev& a, const BtDev& b) { if (a.conn != b.conn) return a.conn; return !a.ks.empty() && b.ks.empty(); });
+}
+// false si no es de audio: para esos se abre la página de Bluetooth de Windows
+static bool btToggle(int i) {
+    if (i < 0 || i >= (int)bts.size()) return true;
+    BtDev& d = bts[i];
+    if (d.ks.empty()) { ShellExecuteW(nullptr, L"open", L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL); return false; }
+    if (btBusy) return true;
+    btBusy = d.addr; btBusyAt = GetTickCount64(); btWant = !d.conn;
+    std::wstring path = d.ks; ULONG op = d.conn ? 1 : 0;  // 0 reconectar, 1 desconectar
+    std::thread([path, op] {  // puede tardar unos segundos: fuera del hilo de la isla
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            struct { GUID Set; ULONG Id, Flags; } prop{KSPROPSETID_BtAudio_, op, 1 /* KSPROPERTY_TYPE_GET */};
+            OVERLAPPED ov{}; ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr); DWORD ret = 0;
+            if (!DeviceIoControl(h, 0x2F0003 /* IOCTL_KS_PROPERTY */, &prop, sizeof prop, nullptr, 0, &ret, &ov) && GetLastError() == ERROR_IO_PENDING)
+                GetOverlappedResult(h, &ov, &ret, TRUE);
+            CloseHandle(ov.hEvent); CloseHandle(h);
+        }
+        Sleep(700);
+        PostMessageW(gHwnd, WM_APP_BTLIST, 0, 0);
+    }).detach();
+    return true;
+}
+static void closeLists() { devOpen = wifiOpen = btOpen = false; gWifiListOpen = false; listScroll = 0; }
 static std::atomic<float> volLvl{-1.f}; static std::atomic<bool> volMuted{false};
 struct VolCb : IAudioEndpointVolumeCallback {
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** pp) override {
@@ -2896,8 +3010,72 @@ static void slider(float x, float y, float w, float h, float v, const wchar_t* g
     if (enabled) addHit(x, y, w, h, id);
     gA = ga;
 }
+static void listHead(float x, float y, float w, const wchar_t* t) {
+    float bx = x + 24, by = y + 21;
+    col(1, 1, 1, 0.08f + 0.1f * hv(H_DEV_BACK)); circle(bx, by, 11);
+    col(1, 1, 1, 0.85f); glyph(L"", fIcon, bx, by);
+    addHit(bx - 13, by - 13, 26, 26, H_DEV_BACK);
+    col(1, 1, 1, 0.5f); text(t, fCalHead, x + 42, y + 12, w - 56, 18);
+}
+static void listRowBg(float x, float ry, float w, float rh, int id, bool cur) {
+    col(1, 1, 1, 0.07f * hv(id) + 0.05f * prs(id) + (cur ? 0.08f : 0.f)); fillRR(x + 8, ry, w - 16, rh - 3, 9);
+}
+static void listMore(float x, float ry, float w, float rh, const wchar_t* t, int id) {
+    float cy = ry + (rh - 3) / 2;
+    col(1, 1, 1, 0.06f * hv(id)); fillRR(x + 8, ry, w - 16, rh - 3, 9);
+    col(1, 1, 1, 0.55f + 0.3f * hv(id)); glyph(L"", fIcon, x + 24, cy); text(t, fSmall, x + 40, cy - 9, w - 54, 18);
+    addHit(x + 8, ry, w - 16, rh - 3, id);
+}
 static void drawControls(float x, float y, float w, float h, int idx) {
     beginCard(idx, y); card(x, y, w, h);
+    const float rh = 27; int rows = (int)((h - 46) / rh) - 1;  // la última fila: "Más opciones"
+    if (wifiOpen) {
+        listHead(x, y, w, L"Wi-Fi");
+        int n = (int)nets.size(); listScroll = std::clamp(listScroll, 0, std::max(0, n - rows));
+        if (!n) { col(1, 1, 1, 0.4f); text(wlanH ? L"Buscando redes..." : L"No hay wifi", fSmall, x, y + 40 + rows * rh / 2 - 9, w, 18, DWRITE_TEXT_ALIGNMENT_CENTER); }
+        static const wchar_t* B[4] = {L"", L"", L"", L""};
+        for (int r = 0; r < rows && listScroll + r < n; r++) {
+            const WNet& nt = nets[listScroll + r]; int id = H_NET + r;
+            float ry = y + 40 + r * rh, cy = ry + (rh - 3) / 2, right = x + w - 14;
+            listRowBg(x, ry, w, rh, id, nt.conn);
+            int bi = nt.q >= 75 ? 3 : nt.q >= 50 ? 2 : nt.q >= 25 ? 1 : 0;
+            col(1, 1, 1, 0.25f); glyph(L"", fIcon, x + 24, cy);
+            col(1, 1, 1, nt.conn ? 1.f : 0.8f); glyph(B[bi], fIcon, x + 24, cy);
+            float nameW = right - (x + 40) - 24;
+            if (nt.conn) {  // desconectar
+                float dx = right - 8; float dh = hv(H_NET_DISC);
+                col(1, 1, 1, 0.1f + 0.12f * dh); circle(dx, cy, 9);
+                col(1, 1, 1, 0.75f + 0.25f * dh); glyph(L"", fIcon, dx, cy);
+                addHit(dx - 10, cy - 10, 20, 20, H_NET_DISC);
+            } else if (nt.ssid == netBusy) {
+                colC(ACC()); text(L"Conectando", fTiny, right - 70, cy - 7, 70, 14, DWRITE_TEXT_ALIGNMENT_TRAILING); nameW -= 50;
+            } else if (nt.sec) { col(1, 1, 1, 0.4f); glyph(L"", fIcon, right - 8, cy); }
+            col(1, 1, 1, nt.conn ? 1.f : 0.85f); text(nt.ssid, fSmall, x + 40, cy - 9, nameW, 18);
+            addHit(x + 8, ry, w - 16, rh - 3, id);
+        }
+        listMore(x, y + 40 + rows * rh, w, rh, L"Más opciones de wifi", H_NET_MORE);
+        return;
+    }
+    if (btOpen) {
+        listHead(x, y, w, L"Bluetooth");
+        int n = (int)bts.size(); listScroll = std::clamp(listScroll, 0, std::max(0, n - rows));
+        if (!n) { col(1, 1, 1, 0.4f); text(L"Nada emparejado", fSmall, x, y + 40 + rows * rh / 2 - 9, w, 18, DWRITE_TEXT_ALIGNMENT_CENTER); }
+        for (int r = 0; r < rows && listScroll + r < n; r++) {
+            const BtDev& d = bts[listScroll + r]; int id = H_BT + r;
+            float ry = y + 40 + r * rh, cy = ry + (rh - 3) / 2, right = x + w - 14;
+            listRowBg(x, ry, w, rh, id, d.conn);
+            int major = (d.cod >> 8) & 0x1F, minor = (d.cod >> 2) & 0x3F;
+            const wchar_t* g = major == 4 ? (minor == 5 || minor == 7 ? L"" : L"") : major == 5 ? L"" : major == 2 ? L"" : major == 1 ? L"" : L"";
+            col(1, 1, 1, d.conn ? 0.95f : 0.6f); glyph(g, fIcon, x + 24, cy);
+            const wchar_t* st = d.addr == btBusy ? (btWant ? L"Conectando" : L"Desconectando") : d.conn ? L"Conectado" : nullptr;
+            float nameW = right - (x + 40);
+            if (st) { if (d.addr == btBusy || d.conn) colC(ACC()); float sw = textWidth(st, fTiny); text(st, fTiny, right - sw, cy - 7, sw, 14); nameW -= sw + 6; }
+            col(1, 1, 1, d.conn ? 1.f : 0.85f); text(d.name, fSmall, x + 40, cy - 9, nameW, 18);
+            addHit(x + 8, ry, w - 16, rh - 3, id);
+        }
+        listMore(x, y + 40 + rows * rh, w, rh, L"Más opciones de Bluetooth", H_BT_MORE);
+        return;
+    }
     if (devOpen) {  // lista de salidas de sonido
         float bx = x + 24, by = y + 21;
         col(1, 1, 1, 0.08f + 0.1f * hv(H_DEV_BACK)); circle(bx, by, 11);
@@ -2937,19 +3115,34 @@ static void drawControls(float x, float y, float w, float h, int idx) {
     int b = briCur;
     briRect = {vx, y + 72, vx + vw, y + 102};
     slider(vx, y + 72, vw, 30, b < 0 ? 0 : b / 100.f, L"\uE793", H_BRI, 14, dragKind == 2, briAvail && b >= 0);
+    // wifi y bluetooth: abren su lista
+    {
+        float by2 = y + 110, bw2 = (vw - 8) / 2;
+        auto pillBtn = [&](float bx, const wchar_t* g, const wchar_t* l, bool on, int id) {
+            float hh = hv(id), k = prs(id);
+            if (on) colC(ACC(), 0.8f + 0.2f * hh); else col(1, 1, 1, 0.12f + 0.06f * hh + 0.04f * k);
+            fillRR(bx, by2, bw2, 28, 11);
+            col(1, 1, 1); glyph(g, fIcon, bx + 15, by2 + 14);
+            text(l, fTiny, bx + 28, by2 + 7, bw2 - 42, 14);
+            col(1, 1, 1, 0.7f); glyph(L"\uE76C", fIcon, bx + bw2 - 11, by2 + 14);
+            addHit(bx, by2, bw2, 28, id);
+        };
+        pillBtn(vx, netKind == 2 ? L"\uE839" : L"\uE701", L"Wi-Fi", netKind == 1, H_NET_BTN);
+        pillBtn(vx + bw2 + 8, L"\uE702", L"Bluetooth", false, H_BT_BTN);
+    }
     struct Q { const wchar_t* g; const wchar_t* l; bool on; } q[4] = {
         {L"\uEC32", L"Cafeína", caffeine}, {mute ? L"\uE74F" : L"\uE767", L"Silencio", mute}, {L"\uE722", L"Captura", false}, {L"\uE72E", L"Bloquear", false}};
-    float qy = y + 140, step = (vw - 40) / 3.f;
+    float qy = y + 170, step = (vw - 40) / 3.f;
     for (int i = 0; i < 4; i++) {
         float cx = vx + 20 + i * step; int id = H_Q + i;
         float on = tw(12 + i * 100, q[i].on ? 1.f : 0.f, 14);
         float k = 1 - 0.08f * prs(id), hh = hv(id);
-        colC(mix({0.2f + 0.07f * hh, 0.2f + 0.07f * hh, 0.215f + 0.07f * hh, 1}, ACC(), on)); circle(cx, qy, 19 * k);
+        colC(mix({0.2f + 0.07f * hh, 0.2f + 0.07f * hh, 0.215f + 0.07f * hh, 1}, ACC(), on)); circle(cx, qy, 16 * k);
         col(1, 1, 1); glyph(q[i].g, fIcon, cx, qy);
-        col(1, 1, 1, 0.6f); text(q[i].l, fTiny, cx - 30, qy + 22, 60, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
-        addHit(cx - 21, qy - 21, 42, 57, id);
+        col(1, 1, 1, 0.6f); text(q[i].l, fTiny, cx - 30, qy + 18, 60, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
+        addHit(cx - 18, qy - 18, 36, 50, id);
     }
-    if (caffeine) { colC(ACC(), 0.9f); text(L"La pantalla no se apagará", fTiny, x, y + h - 20, w, 14, DWRITE_TEXT_ALIGNMENT_CENTER); }
+    if (caffeine) { colC(ACC(), 0.9f); text(L"Pantalla siempre encendida", fTiny, x + w - 14 - 140, y + 14, 140, 14, DWRITE_TEXT_ALIGNMENT_TRAILING); }
 }
 
 // ---------------------------------------------------------------- pestaña Ajustes
@@ -3398,7 +3591,7 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
-        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps(); devOpen = false; std::vector<AudioDev>().swap(devs);
+        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps(); closeLists(); std::vector<AudioDev>().swap(devs); std::vector<WNet>().swap(nets); std::vector<BtDev>().swap(bts);
         setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
@@ -3619,8 +3812,17 @@ static void click(int id) {
     }
     else if (id == H_CLAUDE) { setExpanded(false); launchClaude(); return; }
     else if (id == H_WIN) { if (view == V_SEARCH) view = lastTab; else startSearch(); }
-    else if (id == H_DEV_BTN) { devLoad(); devOpen = true; }
-    else if (id == H_DEV_BACK) devOpen = false;
+    else if (id == H_DEV_BTN) { closeLists(); devLoad(); devOpen = true; }
+    else if (id == H_DEV_BACK) closeLists();
+    else if (id == H_NET_BTN) { closeLists(); netList(); netScan(); wifiOpen = true; gWifiListOpen = true; }
+    else if (id == H_BT_BTN) { closeLists(); btList(); btOpen = true; }
+    else if (id == H_NET_DISC) netDisconnect();
+    else if (id >= H_NET && id < H_NET + 12) { if (!netConnect(listScroll + id - H_NET)) { setExpanded(false); return; } }
+    else if (id >= H_BT && id < H_BT + 12) { if (!btToggle(listScroll + id - H_BT)) { setExpanded(false); return; } }
+    else if (id == H_NET_MORE || id == H_BT_MORE) {
+        ShellExecuteW(nullptr, L"open", id == H_NET_MORE ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL);
+        setExpanded(false); return;
+    }
     else if (id >= H_DEV && id < H_DEV + 20) { devSet(id - H_DEV); devOpen = false; }
     else if (id == H_TRAYBTN) { if (view == V_TRAY) view = lastTab; else { trayRefresh(); view = V_TRAY; } }
     else if (id >= H_TRAY && id < H_TRAY + 40) trayClick(id - H_TRAY, false);
@@ -3840,6 +4042,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             checkFullscreen();
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
+        else if (wp == T_BTLIST) { KillTimer(h, T_BTLIST); PostMessageW(h, WM_APP_BTLIST, 0, 0); }
         else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();
@@ -3907,6 +4110,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LPARAM cl = MAKELPARAM(pt.x, pt.y);
         int id = hitAt(cl), d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
         if (view == V_SEARCH) { sScroll = std::clamp(sScroll + d, 0, sMaxScroll()); render(); return 0; }
+        if ((wifiOpen || btOpen) && ((id >= H_NET && id < H_NET + 12) || (id >= H_BT && id < H_BT + 12) || id == H_NET_MORE || id == H_BT_MORE || id == H_NET_DISC)) {
+            listScroll = std::max(0, listScroll + d); render(); return 0;
+        }
         if ((id >= H_APP && id < H_APP + 100) || id == H_APP_ADD || id == H_APPS_CARD || (id >= H_APP_PAGE && id < H_APP_PAGE + 10)) {
             ULONGLONG n = nowMs(); static ULONGLONG lastFlip = 0;
             if (n - lastFlip > 250) { lastFlip = n; setAppPage(appPage + d); }  // un salto por gesto en el panel táctil
@@ -3968,7 +4174,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == WA_INACTIVE && sActive) { endSearch(false); if (!hovered) setExpanded(false); else render(); }
         break;
     case WM_APP_NET:
+        if (wifiOpen) { netList(); cacheValid = false; if (!animating) render(); }
         if (refreshNet() && !expanded && !animating) render();
+        return 0;
+    case WM_APP_BTLIST:  // tras conectar o desconectar: Windows tarda un poco en reflejarlo, se mira unas veces
+        if (btOpen) {
+            btList();
+            if (btBusy) {
+                bool done = false; for (auto& d : bts) if (d.addr == btBusy && d.conn == btWant) done = true;
+                if (done || GetTickCount64() - btBusyAt > 12000) btBusy = 0; else SetTimer(h, T_BTLIST, 1200, nullptr);
+            }
+            cacheValid = false; if (!animating) render();
+        } else btBusy = 0;
         return 0;
     case WM_APP_VOL:
         { static int lastVi = -1; int vi = volIcon(); if (vi != lastVi) { lastVi = vi; if (!expanded && !animating) render(); } }

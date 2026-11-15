@@ -1197,7 +1197,13 @@ static void trayParse(const COPYDATASTRUCT* cds) {
     }
     if (changed && gHwnd) PostMessageW(gHwnd, WM_APP_TRAY, 0, 0);
 }
-static void trayTopmost() { if (trayWnd) SetWindowPos(trayWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+// por delante de la barra del explorador y en su mismo sitio (hay programas que miran dónde está la barra
+// con GetWindowRect); asíncrono para que la isla no espere nunca a ese hilo
+static void trayTopmost() {
+    if (!trayWnd) return;
+    RECT r{}; HWND t = realTray(); if (t) GetWindowRect(t, &r);
+    SetWindowPos(trayWnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+}
 static void trayBroadcast() { trayBroadcastAt = GetTickCount64(); if (WM_TASKBARCREATED) SendNotifyMessageW(HWND_BROADCAST, WM_TASKBARCREATED, 0, 0); }
 static LRESULT CALLBACK TrayProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COPYDATA) {  // iconos (dwData 1) y avisos de barras (0, 3...): todo sigue llegando al explorador
@@ -1240,39 +1246,56 @@ static int iconWidth(HICON h) {
     if (ii.hbmMask) DeleteObject(ii.hbmMask);
     return bm.bmWidth;
 }
+static std::map<std::wstring, std::wstring> trayExeNames;  // descripción de cada .exe (leerla cuesta)
 static void trayRefresh() {
     trayList.clear();
     UINT px = (UINT)lroundf(32 * scale);
     std::set<std::wstring> keep;
-    std::lock_guard<std::mutex> lk(trayMx);
-    for (auto it = trayIcons.begin(); it != trayIcons.end();) {
-        if (!IsWindow(it->hwnd)) { if (it->icon) DestroyIcon(it->icon); it = trayIcons.erase(it); continue; }
-        if (it->hidden || !it->icon) { ++it; continue; }
-        TrayView v; v.hwnd = it->hwnd; v.uid = it->uid; v.cb = it->cb; v.ver = it->ver;
-        wchar_t k[64];
-        if (it->hasGuid) StringFromGUID2(it->guid, k, 64); else swprintf(k, 64, L"%p:%u", (void*)it->hwnd, it->uid);
-        v.key = k;
-        DWORD pid = 0; GetWindowThreadProcessId(it->hwnd, &pid);
-        std::wstring exe = exeOfPid(pid), tip = it->tip;
+    // con el candado solo se copia lo necesario: las apps que cambian su icono no tienen que esperar
+    struct Snap { TrayView v; std::wstring tip; int gen; HICON icon; };  // icon: copia propia, solo si hay que redibujarlo
+    std::vector<Snap> snap;
+    {
+        std::lock_guard<std::mutex> lk(trayMx);
+        for (auto it = trayIcons.begin(); it != trayIcons.end();) {
+            if (!IsWindow(it->hwnd)) { if (it->icon) DestroyIcon(it->icon); it = trayIcons.erase(it); continue; }
+            if (it->hidden || !it->icon) { ++it; continue; }
+            Snap sn; sn.v.hwnd = it->hwnd; sn.v.uid = it->uid; sn.v.cb = it->cb; sn.v.ver = it->ver; sn.tip = it->tip; sn.gen = it->gen; sn.icon = nullptr;
+            wchar_t k[64];
+            if (it->hasGuid) StringFromGUID2(it->guid, k, 64); else swprintf(k, 64, L"%p:%u", (void*)it->hwnd, it->uid);
+            sn.v.key = k;
+            auto b = trayBmps.find(sn.v.key);
+            if (b == trayBmps.end() || b->second.first != it->gen) sn.icon = CopyIcon(it->icon);
+            snap.push_back(sn);
+            ++it;
+        }
+    }
+    for (auto& sn : snap) {
+        TrayView& v = sn.v;
+        DWORD pid = 0; GetWindowThreadProcessId(v.hwnd, &pid);
+        std::wstring exe = exeOfPid(pid), tip = sn.tip;
         size_t nl = tip.find_first_of(L"\r\n"); if (nl != std::wstring::npos) tip.resize(nl);
         v.name = trim(tip);
-        if (v.name.empty() && !exe.empty()) v.name = exeDescription(exe);
-        auto b = trayBmps.find(v.key);
-        if (b == trayBmps.end() || b->second.first != it->gen) {
+        if (v.name.empty() && !exe.empty()) {
+            auto nm = trayExeNames.find(exe);
+            v.name = nm != trayExeNames.end() ? nm->second : (trayExeNames[exe] = exeDescription(exe));
+        }
+        if (sn.icon) {
+            auto b = trayBmps.find(v.key);
             if (b != trayBmps.end() && b->second.second) b->second.second->Release();
             ID2D1Bitmap* bmp = nullptr;
-            // los iconos de la bandeja suelen ser de 16 px: si es pequeño, mejor el del programa (más nítido)
-            if (iconWidth(it->icon) < (int)px && !exe.empty() && !endsWithI(exe, L"\\explorer.exe")) {  // los del explorador (Bluetooth, sonido...) con su propio icono
+            // los iconos de la bandeja suelen ser de 16 px: si es pequeño, mejor el del programa (más nítido);
+            // los del explorador (Bluetooth, sonido...) con su propio icono
+            if (iconWidth(sn.icon) < (int)px && !exe.empty() && !endsWithI(exe, L"\\explorer.exe")) {
                 HICON hi = iconFor(exe, SHIL_JUMBO);
                 if (hi) { bmp = bitmapFromIcon(hi, px, true); DestroyIcon(hi); }
                 if (!bmp && (hi = iconFor(exe, SHIL_EXTRALARGE))) { bmp = bitmapFromIcon(hi, px, false); DestroyIcon(hi); }
             }
-            if (!bmp) bmp = bitmapFromIcon(it->icon, px, false);
-            trayBmps[v.key] = {it->gen, bmp};
+            if (!bmp) bmp = bitmapFromIcon(sn.icon, px, false);
+            DestroyIcon(sn.icon);
+            trayBmps[v.key] = {sn.gen, bmp};
         }
         keep.insert(v.key);
         trayList.push_back(v);
-        ++it;
     }
     for (auto b = trayBmps.begin(); b != trayBmps.end();) {
         if (keep.count(b->first)) ++b; else { if (b->second.second) b->second.second->Release(); b = trayBmps.erase(b); }
@@ -3836,7 +3859,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         {   // cargador enchufado: rayo en la píldora
             SYSTEM_POWER_STATUS ps;
             if (GetSystemPowerStatus(&ps) && ps.ACLineStatus <= 1) {
-                if (lastAC == 0 && ps.ACLineStatus == 1 && hasBattery()) startCharge();
+                if (lastAC == 0 && ps.ACLineStatus == 1 && cfg.battery && hasBattery()) startCharge();
                 lastAC = ps.ACLineStatus;
             }
         }

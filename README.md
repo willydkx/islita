@@ -17,6 +17,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 - Si suena música: carátula, título y un ecualizador con el color de la carátula.
 - Si tienes un evento pronto: "Clase en 20 min".
 - Con el temporizador en marcha: la cuenta atrás con un anillo de progreso.
+- Al enchufar el cargador: un rayo animado y la batería llenándose hasta el porcentaje real. Mientras está enchufado sale un rayito al lado de la batería.
 - Si la ventana que estás usando queda debajo de la isla (por ejemplo, maximizada), se encoge a una rayita fina para no tapar nada. Al pasar el ratón por arriba vuelve.
 - Mantén **Ctrl** con el ratón encima para que casi desaparezca y deje pasar los clics a lo que hay debajo.
 
@@ -26,7 +27,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente.
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
-  - Apps abiertas y atajos, como un dock: primero salen las apps que tienes abiertas (aunque no sean atajos), con un puntito debajo, y luego tus atajos. Al pulsar una abierta se cambia a su ventana (si ya estaba delante, a la siguiente o se minimiza). Al pulsar, la isla se queda abierta hasta que apartas el ratón. Con clic derecho sale un menú para abrir otra ventana, añadir o quitar de los atajos y cerrar la app. Atajos: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
+  - Apps abiertas y atajos, como un dock: primero salen las apps que tienes abiertas (aunque no sean atajos), con un puntito debajo (uno por ventana si tiene varias, hasta tres), y luego tus atajos. Al pulsar una abierta se cambia a su ventana (si ya estaba delante, a la siguiente o se minimiza). Al pulsar, la isla se queda abierta hasta que apartas el ratón. Con clic derecho sale un menú para abrir otra ventana, añadir o quitar de los atajos y cerrar la app. Atajos: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.
@@ -41,7 +42,9 @@ En la cabecera hay un botón con el **logo de Windows** que abre el buscador de 
 - Clic o **Enter** para abrirla. Flechas para moverte, **Esc** para borrar o salir.
 - El **+** de cada resultado (o **Ctrl+Enter**) la añade a los atajos de Inicio; si ya está, sale un check y al pulsarlo se quita.
 
-Al lado está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
+Al lado está la flechita de **Segundo plano**: los iconos de las apps que siguen abiertas sin ventana (los de la flechita que hay junto a la hora en la barra de tareas), para cuando la barra está oculta. Clic para abrir la app y clic derecho para su menú, igual que en la barra. islita los recoge sin quitárselos a Windows: la barra de tareas los sigue teniendo todos.
+
+También está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
 
 - Iniciar con Windows y abrir al pasar el ratón.
 - Ocultar la barra de tareas de Windows del todo. Las ventanas maximizadas ocupan toda la pantalla, y la tecla Windows, Alt+Tab y las notificaciones siguen funcionando. Al apagarlo o cerrar islita la barra vuelve tal y como estaba.

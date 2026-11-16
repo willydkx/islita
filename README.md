@@ -14,9 +14,9 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 
 **En reposo**, la píldora muestra la hora, el wifi y el volumen (como en la barra de tareas), la fecha y la batería. Cambia sola según lo que pase:
 
-- Si suena música: carátula, título y un ecualizador con el color de la carátula.
+- Si suena música: carátula, título y un ecualizador con el color de la carátula, sin quitar la hora, el wifi, el volumen, la fecha ni la batería.
 - Si tienes un evento pronto: "Clase en 20 min".
-- Con el temporizador en marcha: la cuenta atrás con un anillo de progreso.
+- Con el temporizador en marcha: la cuenta atrás con un anillo de progreso, también junto al resto de la información.
 - Al enchufar el cargador: un rayo animado y la batería llenándose hasta el porcentaje real. Mientras está enchufado sale un rayito al lado de la batería.
 - Si la ventana que estás usando queda debajo de la isla (por ejemplo, maximizada), se encoge a una rayita fina para no tapar nada. Al pasar el ratón por arriba vuelve.
 - Mantén **Ctrl** con el ratón encima para que casi desaparezca y deje pasar los clics a lo que hay debajo.
@@ -27,7 +27,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente.
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
-  - Apps abiertas y atajos, como un dock: primero salen las apps que tienes abiertas (aunque no sean atajos), con un puntito debajo (uno por ventana si tiene varias, hasta tres), y luego tus atajos. Al pulsar una abierta se cambia a su ventana (si ya estaba delante, a la siguiente o se minimiza). Al pulsar, la isla se queda abierta hasta que apartas el ratón. Con clic derecho sale un menú para abrir otra ventana, añadir o quitar de los atajos y cerrar la app. Atajos: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
+  - Apps abiertas y atajos, como un dock: primero salen las apps que tienes abiertas (aunque no sean atajos), con un puntito debajo (uno por ventana si tiene varias, hasta tres, y un globito con el número si tiene más), y luego tus atajos. Al pulsar una abierta se cambia a su ventana (si ya estaba delante, se minimiza). Si tiene varias ventanas se abre una carpeta, como las del iPhone, con sus ventanas numeradas y su título: se elige con un clic o pulsando el número en el teclado (Esc la cierra). Al pasar el ratón por una app abierta sale debajo de la isla la vista previa en directo de sus ventanas, como en la barra de tareas; en la carpeta, la de la fila que tengas encima. Al pulsar, la isla se queda abierta hasta que apartas el ratón. Con clic derecho sale un menú para abrir otra ventana, añadir o quitar de los atajos y cerrar la app. Atajos: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.

@@ -4238,10 +4238,9 @@ static void dragEnd(LPARAM lp) {
     dragKind = 0;
 }
 static void openFromPill() {
-    if (alertOn) { dismissAlert(); setExpanded(true, 1); return; }
+    if (alertOn) { dismissAlert(); setExpanded(true, lastTab); return; }
     int mode = pillMode();
-    if (mode == PM_TIMER || mode == PM_SW) setExpanded(true, 1);
-    else if (mode == PM_EVENT) {
+    if (mode == PM_EVENT) {
         setExpanded(true, 0);
         SYSTEMTIME st; GetLocalTime(&st); selDay = st.wDay;
     } else setExpanded(true, lastTab);

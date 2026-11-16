@@ -21,13 +21,23 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 - Si la ventana que estás usando queda debajo de la isla (por ejemplo, maximizada), se encoge a una rayita fina para no tapar nada. Al pasar el ratón por arriba vuelve.
 - Mantén **Ctrl** con el ratón encima para que casi desaparezca y deje pasar los clics a lo que hay debajo.
 
-**Al hacer clic** se abre un panel con tres pestañas:
+**El dock**: abajo en el centro hay un dock de cristal translúcido, como el del Mac, que sustituye a la barra de tareas de Windows:
+
+- El botón de Inicio abre el menú Inicio de Windows (clic derecho: el buscador de apps de la isla).
+- Primero tus apps fijadas y, tras una rayita, las demás que tengas abiertas. Las abiertas llevan un puntito debajo (uno por ventana, hasta tres; del color de acento la que estás usando).
+- Al pasar el ratón los iconos se agrandan como una lupa y sale el nombre encima; al rato, la vista previa en directo de sus ventanas.
+- Clic en una abierta: va a su ventana (si ya estaba delante, se minimiza). Si tiene varias se abre una carpeta con sus ventanas numeradas: clic o el número en el teclado (Esc la cierra). Clic en una fijada cerrada: se abre y el icono va dando saltos hasta que sale su ventana. Botón de la rueda: otra ventana nueva.
+- Clic derecho: abrir otra ventana, fijar o quitar del dock y cerrar.
+- Si una app pide atención (parpadea), su icono salta.
+- Cuando la ventana que estás usando lo tapa (por ejemplo, maximizada) se esconde hacia abajo; para sacarlo, lleva el ratón al borde de abajo. En pantalla completa desaparece.
+- Las apps que entran y salen lo hacen animadas, y el dock solo se dibuja cuando algo cambia: en reposo no gasta nada.
+
+**Al hacer clic** en la isla se abre un panel con tres pestañas:
 
 - **Inicio**
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente.
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
-  - Apps abiertas y atajos, como un dock: primero salen las apps que tienes abiertas (aunque no sean atajos), con un puntito debajo (uno por ventana si tiene varias, hasta tres, y un globito con el número si tiene más), y luego tus atajos. Al pulsar una abierta se cambia a su ventana (si ya estaba delante, se minimiza). Si tiene varias ventanas se abre una carpeta, como las del iPhone, con sus ventanas numeradas y su título: se elige con un clic o pulsando el número en el teclado (Esc la cierra). Al pasar el ratón por una app abierta sale debajo de la isla la vista previa en directo de sus ventanas, como en la barra de tareas; en la carpeta, la de la fila que tengas encima. Al pulsar, la isla se queda abierta hasta que apartas el ratón. Con clic derecho sale un menú para abrir otra ventana, añadir o quitar de los atajos y cerrar la app. Atajos: 6 por página y hasta 6 páginas (36). Se cambia de página con la rueda del ratón encima o con los puntitos de abajo. El hueco "+ Añadir" abre el buscador; clic derecho en un atajo para quitarlo.
 - **Herramientas**
   - Temporizador con ruleta como la del iPhone y modo Pomodoro (25 min de enfoque, 5 de descanso y 15 cada cuatro).
   - "Próximo": cuenta atrás hasta tu siguiente clase o evento, con aviso si es un examen o una entrega.
@@ -42,17 +52,17 @@ En la cabecera hay un botón con el **logo de Windows** que abre el buscador de 
 
 - Busca entre todas las apps del menú Inicio (las de escritorio y las de la Store) mientras escribes. No hace falta poner tildes, y vale con las iniciales ("vsc" encuentra Visual Studio Code).
 - Clic o **Enter** para abrirla. Flechas para moverte, **Esc** para borrar o salir.
-- El **+** de cada resultado (o **Ctrl+Enter**) la añade a los atajos de Inicio; si ya está, sale un check y al pulsarlo se quita.
+- El **+** de cada resultado (o **Ctrl+Enter**) la fija en el dock; si ya está, sale un check y al pulsarlo se quita.
 
 Al lado está la flechita de **Segundo plano**: los iconos de las apps que siguen abiertas sin ventana (los de la flechita que hay junto a la hora en la barra de tareas), para cuando la barra está oculta. Clic para abrir la app y clic derecho para su menú, igual que en la barra (la isla se aparta para que el menú quede siempre encima). islita los recoge sin quitárselos a Windows: la barra de tareas los sigue teniendo todos.
 
 También está el botón para abrir **Claude Code** en una terminal y un engranaje con los **ajustes**:
 
 - Iniciar con Windows y abrir al pasar el ratón.
-- Ocultar la barra de tareas de Windows del todo. Las ventanas maximizadas ocupan toda la pantalla, y la tecla Windows, Alt+Tab y las notificaciones siguen funcionando. Al apagarlo o cerrar islita la barra vuelve tal y como estaba.
+- Dock en vez de la barra: enseña el dock y oculta la barra de tareas de Windows del todo. Las ventanas maximizadas ocupan toda la pantalla, y la tecla Windows, Alt+Tab y las notificaciones siguen funcionando. Al apagarlo o cerrar islita la barra vuelve tal y como estaba.
 - Ocultar en pantalla completa y modo rayita.
 - Tamaño (3) y color de acento (6).
-- Transparencia del fondo, siempre o según dónde esté el ratón.
+- Transparencia del fondo (también la del dock), siempre o según dónde esté el ratón.
 - Avisos del calendario y con cuánta antelación.
 
 ## Instalación
@@ -76,12 +86,12 @@ Todo se guarda en tu usuario. No hay nada que configurar dentro de la carpeta de
 
 | Qué | Dónde |
 |---|---|
-| Atajos (hasta 36) | `%APPDATA%\islita\atajos.txt`, una línea por app: `Nombre \| ruta \| icono opcional \| argumentos opcionales` |
+| Apps fijadas en el dock (hasta 36) | `%APPDATA%\islita\atajos.txt`, una línea por app: `Nombre \| ruta \| icono opcional \| argumentos opcionales` |
 | Calendarios | `%APPDATA%\islita\calendarios.txt`, una línea por calendario: `Nombre \| dirección iCal` |
 | Bandeja | `%APPDATA%\islita\bandeja.txt` (solo rutas, no copias de los archivos) |
 | Ajustes | Registro, `HKCU\Software\islita` |
 
-Los dos archivos de texto se abren también desde los ajustes ("Editar atajos" y "Editar calendarios").
+Los dos archivos de texto se abren también desde los ajustes ("Editar apps del dock" y "Editar calendarios").
 
 **Conectar Google Calendar:**
 

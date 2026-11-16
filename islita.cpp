@@ -82,7 +82,9 @@ static MediaInfo gMediaShared;
 static StatsInfo gStatsShared;
 static std::atomic<bool> gExpandedA{false}, gQuit{false}, gVisibleA{true}, gPollSoon{false};
 static HANDLE gWake;
-static HWND gHwnd;
+static HWND gHwnd, dockHwnd;  // la isla y el dock
+static void dockAppsChanged(); static void dockRefreshSoon(UINT ms); static void dockOnForeground(); static void dockDropBitmaps(); static void dockKick();
+static bool dAnim = false;  // el dock está animándose
 static std::wstring gCfgDir, gCalFile;
 
 // eventos del calendario: día = días desde 1970-01-01 (hora local); minutos desde las 00:00, -1 = todo el día
@@ -695,9 +697,9 @@ static StatsInfo stats;
 static ID2D1Bitmap *artBmp, *artSBmp; static unsigned artVerUI = ~0u;
 
 struct App { std::wstring name, target, icon, args; ID2D1Bitmap* bmp = nullptr; bool resolved = false; std::wstring mExe, mExe2, mAumid; };  // m*: para reconocerla abierta
+static const float ICON_DIP = 76;  // los iconos se cargan a este tamaño (el dock los agranda al pasar el ratón)
 static std::vector<App> apps; static bool iconsLoaded = false; static FILETIME appsStamp{};
-static const int APPS_PER_PAGE = 6, MAX_APPS = 36;  // 6 páginas de 6
-static int appPage = 0;
+static const int MAX_APPS = 36;
 static std::wstring cfgDir, appsFile;
 // buscador de aplicaciones (botón con el logo de Windows): solo vive mientras está abierto
 struct SApp { std::wstring name, id, key, ini, path; };  // id = nombre de análisis en shell:AppsFolder; path = programa al que apunta (si se sabe)
@@ -1027,7 +1029,7 @@ static ID2D1Bitmap* thumbFor(const std::wstring& path, UINT px, int flags = SIIG
 static void loadIcons() {
     if (iconsLoaded) return;
     iconsLoaded = true;
-    UINT px = (UINT)lroundf(36 * scale * 1.1f);
+    UINT px = (UINT)lroundf(ICON_DIP * scale);
     for (auto& a : apps) {
         std::wstring src = a.icon.empty() ? a.target : a.icon;
         if (!_wcsnicmp(src.c_str(), L"shell:", 6)) { a.bmp = thumbFor(src, px, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK); continue; }  // apps del menú Inicio
@@ -1043,7 +1045,7 @@ static void loadIcons() {
 // ---------------------------------------------------------------- apps abiertas (como la barra de tareas) delante de los atajos
 struct RunApp { std::wstring key, exe, aumid; std::vector<HWND> wins; };
 struct Tile { int pin = -1, run = -1; };  // índice en apps (atajo) y/o en running (abierta)
-static std::vector<RunApp> running; static std::vector<std::wstring> runOrder; static std::vector<Tile> tiles;
+static std::vector<RunApp> running; static std::vector<std::wstring> runOrder; static std::vector<Tile> tiles; static int nPinnedTiles = 0;
 static std::map<std::wstring, ID2D1Bitmap*> runIcons; static std::map<std::wstring, std::wstring> runNames;
 static HWND fgAtOpen = nullptr;
 static std::map<HWND, unsigned> winSeq; static unsigned winSeqN = 0;  // orden de llegada de cada ventana: numeración estable en la carpeta
@@ -1059,6 +1061,18 @@ static std::wstring exeOfPid(DWORD pid) {
     wchar_t b[MAX_PATH * 2]; DWORD n = MAX_PATH * 2; std::wstring r;
     if (QueryFullProcessImageNameW(h, 0, b, &n)) r.assign(b, n);
     CloseHandle(h); return r;
+}
+// identificador de app de un proceso empaquetado (solo si su programa está dentro de WindowsApps)
+static std::wstring aumidOfPid(DWORD pid, const std::wstring& exe) {
+    if (exe.empty() || !wcsstr(lowerW(exe).c_str(), L"\\windowsapps\\")) return L"";
+    typedef LONG(WINAPI* GAUMI)(HANDLE, UINT32*, PWSTR);
+    static GAUMI f = (GAUMI)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetApplicationUserModelId");
+    if (!f) return L"";
+    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!ph) return L"";
+    wchar_t b[256]; UINT32 n = 256; std::wstring r;
+    if (f(ph, &n, b) == ERROR_SUCCESS) r = b;
+    CloseHandle(ph); return r;
 }
 static std::wstring aumidOf(HWND h) {
     std::wstring r; IPropertyStore* ps = nullptr;
@@ -1099,6 +1113,7 @@ static void refreshRunning() {
             if (c.found) exe = exeOfPid(c.found);
         }
         std::wstring au = aumidOf(h);
+        if (au.empty()) au = aumidOfPid(pid, exe);  // apps de la Tienda que no lo ponen en la ventana (p. ej. Terminal)
         if (exe.empty() && au.empty()) continue;
         std::wstring key = au.empty() ? L"e:" + lowerW(exe) : L"a:" + lowerW(au);
         auto it = m.find(key);
@@ -1111,7 +1126,7 @@ static void refreshRunning() {
     for (auto& k : seen) if (std::find(order.begin(), order.end(), k) == order.end()) order.push_back(k);
     runOrder = order;
     running.clear(); for (auto& k : order) running.push_back(m[k]);
-    HWND fg = GetForegroundWindow(); if (fg != gHwnd) fgAtOpen = fg;
+    HWND fg = GetForegroundWindow(); if (fg != gHwnd && fg != dockHwnd) fgAtOpen = fg;
 }
 static std::wstring exeDescription(const std::wstring& exe) {
     DWORD hnd = 0, sz = GetFileVersionInfoSizeW(exe.c_str(), &hnd);
@@ -1143,7 +1158,7 @@ static std::wstring runName(const RunApp& r) {
 }
 static ID2D1Bitmap* runIcon(const RunApp& r) {
     auto it = runIcons.find(r.key); if (it != runIcons.end()) return it->second;
-    UINT px = (UINT)lroundf(36 * scale * 1.1f); ID2D1Bitmap* b = nullptr;
+    UINT px = (UINT)lroundf(ICON_DIP * scale); ID2D1Bitmap* b = nullptr;
     if (!r.aumid.empty()) b = thumbFor(L"shell:AppsFolder\\" + r.aumid, px, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK);
     if (!b && !r.exe.empty()) {
         HICON h = iconFor(r.exe, SHIL_JUMBO);
@@ -1392,16 +1407,19 @@ static void refreshTiles() {
         bool alive = false; for (auto& r : running) if (r.key == it->first) { alive = true; break; }
         if (alive) ++it; else { if (it->second) it->second->Release(); it = runIcons.erase(it); }
     }
-    tiles.clear();
-    std::vector<bool> used(apps.size(), false);
-    for (int r = 0; r < (int)running.size(); r++) {
-        Tile t; t.run = r;
-        for (int j = 0; j < (int)apps.size(); j++) if (!used[j] && runMatches(running[r], apps[j])) { t.pin = j; used[j] = true; break; }
-        tiles.push_back(t);
-    }
-    for (int j = 0; j < (int)apps.size(); j++) if (!used[j]) { Tile t; t.pin = j; tiles.push_back(t); }
+    // como el dock del Mac: primero las fijadas (en su orden, con puntito si están abiertas) y luego las demás abiertas
+    tiles.clear(); nPinnedTiles = 0;
+    std::vector<bool> used(running.size(), false);
+    std::vector<int> pinRun(apps.size(), -1);
+    for (int j = 0; j < (int)apps.size(); j++)
+        for (int r = 0; r < (int)running.size(); r++) if (!used[r] && runMatches(running[r], apps[j])) { pinRun[j] = r; used[r] = true; break; }
+    // si no se ha reconocido por el programa (p. ej. Discord, que se abre con su Update.exe), por el nombre
+    for (int j = 0; j < (int)apps.size(); j++) if (pinRun[j] < 0)
+        for (int r = 0; r < (int)running.size(); r++) if (!used[r] && !_wcsicmp(runName(running[r]).c_str(), apps[j].name.c_str())) { pinRun[j] = r; used[r] = true; break; }
+    for (int j = 0; j < (int)apps.size(); j++) { Tile t; t.pin = j; t.run = pinRun[j]; tiles.push_back(t); nPinnedTiles++; }
+    for (int r = 0; r < (int)running.size(); r++) if (!used[r]) { Tile t; t.run = r; tiles.push_back(t); }
     if ((int)tiles.size() > MAX_TILES) tiles.resize(MAX_TILES);
-    cacheValid = false;
+    nPinnedTiles = std::min(nPinnedTiles, (int)tiles.size());
 }
 static std::wstring tileName(const Tile& t) { return t.pin >= 0 ? apps[t.pin].name : runName(running[t.run]); }
 static ID2D1Bitmap* tileIcon(const Tile& t) { return t.pin >= 0 && apps[t.pin].bmp ? apps[t.pin].bmp : t.run >= 0 ? runIcon(running[t.run]) : nullptr; }
@@ -1842,20 +1860,21 @@ static void sTogglePin(int ri) {
     if (ri < 0 || ri >= (int)sRes.size()) return;
     const SApp& a = sApps[sRes[ri]];
     std::wstring t = APPS_PREFIX + a.id, cur = sPinnedTarget(a);
-    if (!cur.empty()) { removeAtajo(cur); sMsg = L"Quitada de los atajos"; }
-    else if ((int)apps.size() >= MAX_APPS) sMsg = L"Atajos llenos (36): quita uno antes";
-    else { appendAtajo(a.name, t); sMsg = L"Añadida a los atajos"; appPage = (int)apps.size() / APPS_PER_PAGE; }
+    if (!cur.empty()) { removeAtajo(cur); sMsg = L"Quitada del dock"; }
+    else if ((int)apps.size() >= MAX_APPS) sMsg = L"Dock lleno (36): quita una antes";
+    else { appendAtajo(a.name, t); sMsg = L"Fijada en el dock"; }
     sMsgAt = nowMs();
-    loadApps(); loadIcons(); refreshTiles();
+    dockAppsChanged();
 }
-static void grabFocus() {
+static void grabFocusOf(HWND w) {
     HWND fg = GetForegroundWindow();
-    if (fg != gHwnd && !SetForegroundWindow(gHwnd)) {
+    if (fg != w && !SetForegroundWindow(w)) {
         DWORD ft = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
-        if (ft && ft != me && AttachThreadInput(me, ft, TRUE)) { SetForegroundWindow(gHwnd); AttachThreadInput(me, ft, FALSE); }
+        if (ft && ft != me && AttachThreadInput(me, ft, TRUE)) { SetForegroundWindow(w); AttachThreadInput(me, ft, FALSE); }
     }
-    SetFocus(gHwnd);
+    SetFocus(w);
 }
+static void grabFocus() { grabFocusOf(gHwnd); }
 static void startSearch() {
     view = V_SEARCH; sActive = true; sQ.clear(); sMsg.clear(); sCaret = true;
     HWND fg = GetForegroundWindow(); if (fg != gHwnd) sPrevFg = fg;
@@ -1924,7 +1943,7 @@ static void createResources() {
 static void createTarget() {
     SafeRelease(cacheRT); cacheValid = false;
     for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; }
-    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; freeIcons(); freeSearchIcons(); freeRunIcons();
+    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons();
     D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 0, 0);
     d2d->CreateDCRenderTarget(&p, &dcrt); rt = dcrt;
@@ -1949,9 +1968,8 @@ static void updateMonitor() {
     float s = dx / 96.f * SIZES[cfg.size];
     if (s != scale || !rt) {
         dpi = dx; scale = s;
-        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeIcons(); freeSearchIcons(); freeRunIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
+        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
         ensureDib();
-        if (expanded) loadIcons();
     }
 }
 
@@ -2714,95 +2732,6 @@ static void drawStats(float x, float y, float w, float h, int idx) {
     }
 }
 
-static int appSlots() { return (int)tiles.size() + ((int)apps.size() < MAX_APPS ? 1 : 0); }  // abiertas + atajos + hueco "Añadir"
-static int appPages() { return std::max(1, (appSlots() + APPS_PER_PAGE - 1) / APPS_PER_PAGE); }
-static void setAppPage(int p) { appPage = std::clamp(p, 0, appPages() - 1); }
-static void drawAppSlot(int i, float ix, float iy, float is, float gap, float colW, bool hitsHere) {
-    bool hs = hitsOn; hitsOn = hs && hitsHere;
-    if (i < (int)tiles.size()) {
-        const Tile& t = tiles[i];
-        int id = H_APP + i;
-        float k = 1 + 0.1f * hv(id) - 0.12f * prs(id);
-        float s = is * k, ox = ix - (s - is) / 2, oy = iy - (s - is) / 2 - 2 * hv(id);
-        std::wstring name = tileName(t);
-        if (ID2D1Bitmap* bmp = tileIcon(t)) {
-            D2D1_RECT_F d{ox, oy, ox + s, oy + s};
-            rt->DrawBitmap(bmp, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
-        } else {
-            col(0.25f, 0.25f, 0.27f); fillRR(ox, oy, s, s, 10);
-            col(1, 1, 1, 0.9f); text(name.substr(0, 1), fTitle, ox, oy, s, s, DWRITE_TEXT_ALIGNMENT_CENTER);
-        }
-        if (t.run >= 0) {  // puntito de "abierta" (del color de acento si es la ventana activa)
-            const RunApp& r = running[t.run];
-            bool act = std::find(r.wins.begin(), r.wins.end(), fgAtOpen) != r.wins.end();
-            if (act) colC(ACC()); else col(1, 1, 1, 0.7f);
-            int nd = std::min((int)r.wins.size(), 3);
-            if (nd <= 1) fillRR(ix + is / 2 - (act ? 4.f : 1.8f), iy + is + 2, act ? 8.f : 3.6f, 3, 1.5f);
-            else {  // varias ventanas del mismo programa: un puntito por ventana
-                float gp = 5.2f, x0 = ix + is / 2 - (nd - 1) * gp / 2;
-                for (int k = 0; k < nd; k++) fillRR(x0 + k * gp - 1.6f, iy + is + 2, 3.2f, 3, 1.5f);
-            }
-            if (r.wins.size() > 3) {  // con más de 3 los puntitos se quedan cortos: globito con el número
-                std::wstring nn = std::to_wstring(std::min((int)r.wins.size(), 99));
-                float bw = std::max(15.f, textWidth(nn, fTiny) + 8), bx = ox + s - bw + 5, by = oy - 5;
-                col(0.1f, 0.1f, 0.11f); fillRR(bx - 1.5f, by - 1.5f, bw + 3, 18, 9);
-                colC(ACC()); fillRR(bx, by, bw, 15, 7.5f);
-                col(1, 1, 1); textN(nn, fTiny, bx, by, bw, 15, DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
-        }
-        col(1, 1, 1, 0.55f + 0.4f * hv(id));
-        text(name, fApp, ix - gap / 2, iy + is + 5, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
-        addHit(ix - gap / 2, iy - 4, colW, is + 22, id);
-    } else {  // hueco libre: abre el buscador para añadir una app
-        float hh = hv(H_APP_ADD);
-        float k = 1 + 0.06f * hh - 0.1f * prs(H_APP_ADD), s = (is - 4) * k, ox = ix + (is - s) / 2, oy = iy + (is - s) / 2;
-        col(1, 1, 1, 0.05f + 0.06f * hh); fillRR(ox, oy, s, s, 10);
-        col(1, 1, 1, 0.25f + 0.3f * hh);
-        D2D1_ROUNDED_RECT rr{{ox, oy, ox + s, oy + s}, 10, 10}; rt->DrawRoundedRectangle(&rr, br, 1.3f, dashStroke);
-        col(1, 1, 1, 0.55f + 0.4f * hh);
-        float cx = ix + is / 2, cy = iy + is / 2;
-        line(cx - 5, cy, cx + 5, cy, 1.6f); line(cx, cy - 5, cx, cy + 5, 1.6f);
-        col(1, 1, 1, 0.4f + 0.4f * hh);
-        text(L"Añadir", fApp, ix - gap / 2, iy + is + 3, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
-        addHit(ix - gap / 2, iy - 4, colW, is + 22, H_APP_ADD);
-    }
-    hitsOn = hs;
-}
-static void drawApps(float x, float y, float w, float h, int idx) {
-    beginCard(idx, y); card(x, y, w, h);
-    setAppPage(appPage);
-    int pages = appPages(), slots = appSlots();
-    float is = 36, gap = 12, colW = is + gap;
-    float x0 = x + (w - (2 * is + gap)) / 2, rowH = pages > 1 ? 60.f : 66.f, top = pages > 1 ? 10.f : 14.f;
-    // páginas: la actual entra deslizándose y la anterior sale por el otro lado
-    float pos = tw(19, (float)appPage, 16), ga = gA;
-    D2D1_RECT_F clip{x, y, x + w, y + h};
-    rt->PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    for (int p = 0; p < pages; p++) {
-        float d = p - pos;
-        if (fabsf(d) >= 1) continue;
-        gA = ga * (1 - fabsf(d));
-        for (int j = 0; j < APPS_PER_PAGE; j++) {
-            int i = p * APPS_PER_PAGE + j; if (i >= slots) break;
-            float ix = x0 + (j % 2) * colW + d * w, iy = y + top + (j / 2) * rowH;
-            drawAppSlot(i, ix, iy, is, gap, colW, p == appPage && fabsf(d) < 0.3f);
-        }
-    }
-    gA = ga;
-    rt->PopAxisAlignedClip();
-    // puntitos de página
-    if (pages > 1) {
-        float dy = y + h - 12, sp = 11, dx0 = x + w / 2 - (pages - 1) * sp / 2;
-        for (int p = 0; p < pages; p++) {
-            float on = clampf(1 - fabsf(p - pos), 0, 1);
-            col(1, 1, 1, 0.25f + 0.65f * on + 0.15f * hv(H_APP_PAGE + p));
-            circle(dx0 + p * sp, dy, 2.6f + 0.6f * on);
-            addHit(dx0 + p * sp - sp / 2, dy - 8, sp, 16, H_APP_PAGE + p);
-        }
-    }
-    addHit(x, y, w, h, H_APPS_CARD);  // fondo de la tarjeta: para la rueda del ratón
-}
-
 // ---------------------------------------------------------------- buscador de aplicaciones
 static const D2D1_COLOR_F WINBLUE{0.18f, 0.62f, 1.f, 1};
 static void winLogo(float cx, float cy, float s, D2D1_COLOR_F c) {
@@ -2871,7 +2800,7 @@ static void drawSearch(float x, float y, float w, float h) {
     // texto a la derecha del campo
     std::wstring info;
     if (!sMsg.empty() && nowMs() - sMsgAt < 2500) info = sMsg;
-    else if (hoverPin >= 0) info = sPinned(sApps[sRes[hoverPin]]) ? L"Quitar de los atajos" : (int)apps.size() >= MAX_APPS ? L"Atajos llenos (36)" : L"Añadir a los atajos";
+    else if (hoverPin >= 0) info = sPinned(sApps[sRes[hoverPin]]) ? L"Quitar del dock" : (int)apps.size() >= MAX_APPS ? L"Dock lleno (36)" : L"Fijar en el dock";
     else if (!sLoaded) info = L"Cargando...";
     else info = std::to_wstring(sRes.size()) + (sRes.size() == 1 ? L" app" : L" apps");
     col(1, 1, 1, 0.4f); text(info, fTiny, fx + fw - 190, fy, 176, fh, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -2885,53 +2814,67 @@ static void drawSearch(float x, float y, float w, float h) {
 }
 
 
-// ---------------------------------------------------------------- menú de clic derecho de una app (como el de la barra de tareas)
+// ---------------------------------------------------------------- menú de clic derecho de una app del dock (como el de la barra de tareas)
+// Los menús del dock se abren hacia arriba desde el icono, dentro de la propia ventana del dock.
 enum { CA_NEW, CA_PIN, CA_UNPIN, CA_CLOSE };
 static int ctxTile = -1; static D2D1_RECT_F ctxAnchor{}; static std::vector<int> ctxActs;
+static const float CTX_W = 212, CTX_RH = 30, CTX_HD = 30, CTX_P = 5;
 static std::wstring tileLaunchTarget(const Tile& t, std::wstring* args) {
     if (t.pin >= 0) { if (args) *args = apps[t.pin].args; return apps[t.pin].target; }
     const RunApp& r = running[t.run];
     return r.aumid.empty() ? r.exe : L"shell:AppsFolder\\" + r.aumid;
 }
-static void drawCtx(float ox, float oy) {
-    if (ctxTile < 0 || ctxTile >= (int)tiles.size()) return;
-    const Tile& t = tiles[ctxTile];
+static float ctxBuild() {  // rellena las acciones y devuelve el alto del menú
     ctxActs.clear();
+    if (ctxTile < 0 || ctxTile >= (int)tiles.size()) return 0;
+    const Tile& t = tiles[ctxTile];
     ctxActs.push_back(CA_NEW);
     if (t.pin >= 0) ctxActs.push_back(CA_UNPIN); else if ((int)apps.size() < MAX_APPS) ctxActs.push_back(CA_PIN);
     if (t.run >= 0) ctxActs.push_back(CA_CLOSE);
-    const float W = 196, RH = 30, HD = 30, P = 5;
-    float h = HD + ctxActs.size() * RH + P;
-    float x = std::max(ox + 12, ctxAnchor.left - W - 6), y = std::clamp(ctxAnchor.top - 6, oy + 46, oy + EH - 10 - h);
-    float a = easeOut(tw(20, 1.f, 22)), ga = gA; gA = ga * a;
-    float sc = 0.96f + 0.04f * a;
-    D2D1_MATRIX_3X2_F base; rt->GetTransform(&base);
-    float cx = x + W, cy = y;  // crece desde la esquina más cercana a la app
+    return CTX_HD + ctxActs.size() * CTX_RH + CTX_P;
+}
+// escala lo que se dibuje después desde (cx, cy): de "from" a 1 según a (0..1)
+static void popupBegin(float cx, float cy, float a, float from, D2D1_MATRIX_3X2_F& base) {
+    rt->GetTransform(&base);
+    float sc = from + (1 - from) * a;
     D2D1_MATRIX_3X2_F m{sc, 0, 0, sc, cx - sc * cx, cy - sc * cy};
     D2D1_MATRIX_3X2_F mb = mmul(m, base); rt->SetTransform(&mb);
-    col(0, 0, 0, 0.35f); fillRR(x - 1, y + 2, W + 2, h + 2, 13);  // sombra
-    col(0.165f, 0.165f, 0.175f); fillRR(x, y, W, h, 12);
-    col(1, 1, 1, 0.1f); D2D1_ROUNDED_RECT rr{{x, y, x + W, y + h}, 12, 12}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+}
+static void popupCard(float x, float y, float w, float h, float r) {
+    for (int i = 3; i >= 1; i--) { col(0, 0, 0, 0.09f); float g = i * 2.5f; fillRR(x - g, y - g + 3, w + 2 * g, h + 2 * g, r + g); }  // sombra
+    col(0.14f, 0.14f, 0.15f, 0.97f); fillRR(x, y, w, h, r);
+    col(1, 1, 1, 0.12f); D2D1_ROUNDED_RECT rr{{x + 0.5f, y + 0.5f, x + w - 0.5f, y + h - 0.5f}, r, r}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+}
+static void drawCtx(float dW, float barTop) {
+    float h = ctxBuild();
+    if (!h) return;
+    const Tile& t = tiles[ctxTile];
+    float acx = (ctxAnchor.left + ctxAnchor.right) / 2;
+    float x = std::clamp(acx - CTX_W / 2, 8.f, dW - 8 - CTX_W), y = barTop - 12 - h;
+    float a = easeOut(tw(20, 1.f, 20)), ga = gA; gA = ga * a;
+    D2D1_MATRIX_3X2_F base; popupBegin(acx, y + h + 8, a, 0.9f, base);  // crece desde el icono
+    popupCard(x, y, CTX_W, h, 12);
     if (ID2D1Bitmap* b = tileIcon(t)) { D2D1_RECT_F d{x + 12, y + 7, x + 28, y + 23}; rt->DrawBitmap(b, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); }
-    col(1, 1, 1, 0.6f); text(tileName(t), fSmall, x + 34, y + 5, W - 46, 20);
-    col(1, 1, 1, 0.08f); fillRR(x + 8, y + HD - 1, W - 16, 1, 0.5f);
+    col(1, 1, 1, 0.6f); text(tileName(t), fSmall, x + 34, y + 5, CTX_W - 46, 20);
+    col(1, 1, 1, 0.08f); fillRR(x + 8, y + CTX_HD - 1, CTX_W - 16, 1, 0.5f);
     int nw = t.run >= 0 ? (int)running[t.run].wins.size() : 0;
     for (size_t i = 0; i < ctxActs.size(); i++) {
         int id = H_CTX + (int)i, act = ctxActs[i];
-        float ry = y + HD + 2 + i * RH;
-        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, W - 10, RH - 2, 8);
-        const wchar_t* g = act == CA_NEW ? L"" : act == CA_PIN ? L"" : act == CA_UNPIN ? L"" : L"";
-        std::wstring l = act == CA_NEW ? L"Abrir nueva ventana" : act == CA_PIN ? L"Añadir a los atajos" : act == CA_UNPIN ? L"Quitar de los atajos"
+        float ry = y + CTX_HD + 2 + i * CTX_RH;
+        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, CTX_W - 10, CTX_RH - 2, 8);
+        const wchar_t* g = act == CA_NEW ? L"" : act == CA_PIN ? L"" : act == CA_UNPIN ? L"" : L"";
+        std::wstring l = act == CA_NEW ? L"Abrir nueva ventana" : act == CA_PIN ? L"Fijar en el dock" : act == CA_UNPIN ? L"Quitar del dock"
                        : nw > 1 ? L"Cerrar todas las ventanas (" + std::to_wstring(nw) + L")" : L"Cerrar ventana";
         D2D1_COLOR_F c = act == CA_CLOSE ? RED : D2D1_COLOR_F{1, 1, 1, 0.9f};
-        colC(c, c.a); glyph(g, fIcon, x + 20, ry + (RH - 2) / 2, 20);
-        colC(c, c.a); text(l, fSmall, x + 36, ry, W - 46, RH - 2);
-        addHit(x + 5, ry, W - 10, RH - 2, id);
+        colC(c, c.a); glyph(g, fIcon, x + 20, ry + (CTX_RH - 2) / 2, 20);
+        colC(c, c.a); text(l, fSmall, x + 36, ry, CTX_W - 46, CTX_RH - 2);
+        addHit(x + 5, ry, CTX_W - 10, CTX_RH - 2, id);
     }
     rt->SetTransform(&base);
     gA = ga;
-    addHit(ox, oy, EW, EH, H_CTX_BG);  // un clic fuera del menú lo cierra
 }
+static void dockAppsChanged();
+static void dockRefreshSoon(UINT ms);
 static void ctxRun(int item) {
     if (ctxTile < 0 || ctxTile >= (int)tiles.size() || item < 0 || item >= (int)ctxActs.size()) { ctxTile = -1; return; }
     Tile t = tiles[ctxTile]; int act = ctxActs[item];
@@ -2940,17 +2883,17 @@ static void ctxRun(int item) {
         std::wstring args, tg = tileLaunchTarget(t, &args);
         ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
     } else if (act == CA_PIN) {
-        appendAtajo(tileName(t), tileLaunchTarget(t, nullptr)); loadApps(); loadIcons(); refreshTiles();
+        appendAtajo(tileName(t), tileLaunchTarget(t, nullptr)); dockAppsChanged();
     } else if (act == CA_UNPIN) {
-        removeAtajo(apps[t.pin].target); loadApps(); loadIcons(); refreshTiles();
+        removeAtajo(apps[t.pin].target); dockAppsChanged();
     } else if (act == CA_CLOSE && t.run >= 0) {
         for (HWND w : running[t.run].wins) PostMessage(w, WM_SYSCOMMAND, SC_CLOSE, 0);  // como "Cerrar ventana" de la barra de tareas
-        SetTimer(gHwnd, T_TILES, 500, nullptr);  // las ventanas tardan un poco en cerrarse
+        dockRefreshSoon(500);  // las ventanas tardan un poco en cerrarse
     }
 }
 
 // ---------------------------------------------------------------- vista previa de ventanas (miniaturas en directo de DWM, como la barra de tareas)
-// Va en una ventanita aparte debajo de la isla: DWM las pinta él solo, sin gastar CPU de islita.
+// Va en una ventanita aparte encima del dock: DWM las pinta él solo, sin gastar CPU de islita.
 static HWND prevWnd = nullptr;
 static std::vector<HWND> prevSrcs; static std::vector<HTHUMBNAIL> prevThumbs; static std::vector<RECT> prevSlots; static std::vector<std::wstring> prevTitles;
 static std::vector<HWND> prevPending; static ULONGLONG prevPendingAt = 0;
@@ -2996,8 +2939,8 @@ static void hidePreview() {
     prevThumbs.clear(); prevSrcs.clear(); prevSlots.clear(); prevTitles.clear();
     if (prevWnd) ShowWindow(prevWnd, SW_HIDE);
 }
-// cx = centro horizontal en pantalla; bottom = borde de abajo del panel en pantalla; titles vacío = sin títulos
-static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::wstring>& titles, int cx, int bottom) {
+// cx = centro horizontal en pantalla; edge = coordenada de pantalla por encima de la cual va; titles vacío = sin títulos
+static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::wstring>& titles, int cx, int edge) {
     if (srcs == prevSrcs && prevWnd && IsWindowVisible(prevWnd)) return;
     hidePreview();
     if (srcs.empty()) return;
@@ -3044,125 +2987,87 @@ static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::ws
         x += sz[i].cx + gap;
     }
     prevSrcs = srcs; prevTitles = titles;
+    int wh = 2 * pad + titleH + rowH;
     int wx = std::clamp(cx - totW / 2, (int)mon.left + 8, (int)mon.right - 8 - totW);
-    SetWindowPos(prevWnd, HWND_TOPMOST, wx, bottom + (int)(8 * scale), totW, 2 * pad + titleH + rowH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowPos(prevWnd, HWND_TOPMOST, wx, edge - (int)(8 * scale) - wh, totW, wh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(prevWnd, nullptr, TRUE);
 }
 
 // ---------------------------------------------------------------- carpeta: las ventanas de una app, numeradas (como las carpetas del iPhone)
 static int fldTile = -1, fldScroll = 0; static D2D1_RECT_F fldAnchor{}; static std::vector<HWND> fldWins; static HWND fldPrevFg = nullptr;
 static const int FLD_ROWS = 6;
-static void openFolder(int tile) {
+static const float FLD_W = 300, FLD_RH = 30, FLD_HD = 32, FLD_P = 6;
+static float folderHeight() { return fldTile < 0 ? 0 : FLD_HD + std::min((int)fldWins.size(), FLD_ROWS) * FLD_RH + FLD_P; }
+static void grabFocusOf(HWND w);
+static void openFolder(int tile, D2D1_RECT_F anchor) {
     const RunApp& r = running[tiles[tile].run];
     fldWins = r.wins;
     std::stable_sort(fldWins.begin(), fldWins.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
-    fldTile = tile; fldScroll = 0; twSnap(24, 0);
-    for (auto& ht : hits) if (ht.id == H_APP + tile) { fldAnchor = ht.r; break; }
-    HWND fg = GetForegroundWindow(); fldPrevFg = fg != gHwnd ? fg : fgAtOpen;
-    grabFocus();  // para poder elegir con el número
-    hoverId = H_NONE;
+    fldTile = tile; fldScroll = 0; twSnap(24, 0); fldAnchor = anchor;
+    HWND fg = GetForegroundWindow(); fldPrevFg = fg != dockHwnd ? fg : fgAtOpen;
+    grabFocusOf(dockHwnd);  // para poder elegir con el número
 }
 static void closeFolder(bool restoreFocus) {
     if (fldTile < 0) return;
     fldTile = -1; fldWins.clear(); hidePreview();
-    if (restoreFocus && GetForegroundWindow() == gHwnd && fldPrevFg && IsWindow(fldPrevFg)) SetForegroundWindow(fldPrevFg);
+    if (restoreFocus && GetForegroundWindow() == dockHwnd && fldPrevFg && IsWindow(fldPrevFg)) SetForegroundWindow(fldPrevFg);
     fldPrevFg = nullptr;
 }
 static void folderPick(int i) {
     if (i < 0 || i >= (int)fldWins.size()) return;
     HWND w = fldWins[i];
     closeFolder(false);
-    if (IsWindow(w)) forceForeground(w); else SetTimer(gHwnd, T_TILES, 100, nullptr);
+    if (IsWindow(w)) forceForeground(w); else dockRefreshSoon(100);
 }
 static std::wstring folderTitle(HWND w, const std::wstring& app) {
     wchar_t b[256]; int n = GetWindowTextW(w, b, 256);
     std::wstring t(b, std::max(n, 0));
     // "Aula Global - Google Chrome" -> "Aula Global": el nombre de la app ya está arriba
-    for (const wchar_t* sep : {L" - ", L" \u2014 ", L" \u2013 "}) {
+    for (const wchar_t* sep : {L" - ", L" — ", L" – "}) {
         std::wstring tail = sep + app;
         if (t.size() > tail.size() && !_wcsicmp(t.c_str() + t.size() - tail.size(), tail.c_str())) { t.resize(t.size() - tail.size()); break; }
     }
     return t;
 }
-static void drawFolder(float ox, float oy) {
+static void drawFolder(float dW, float barTop) {
     if (fldTile < 0 || fldTile >= (int)tiles.size()) return;
     const Tile& t = tiles[fldTile];
     int n = (int)fldWins.size(), rows = std::min(n, FLD_ROWS);
     fldScroll = std::clamp(fldScroll, 0, std::max(0, n - FLD_ROWS));
-    const float W = 300, RH = 30, HD = 32, P = 6;
-    float h = HD + rows * RH + P;
-    float x = std::max(ox + 12, fldAnchor.left - W - 6), y = std::clamp(fldAnchor.top - 6, oy + 46, oy + EH - 10 - h);
-    float a = easeOut(tw(24, 1.f, 22)), ga = gA; gA = ga * a;
-    float sc = 0.92f + 0.08f * a;
-    D2D1_MATRIX_3X2_F base; rt->GetTransform(&base);
-    float cx = x + W, cy = y;  // crece desde la app
-    D2D1_MATRIX_3X2_F m{sc, 0, 0, sc, cx - sc * cx, cy - sc * cy};
-    D2D1_MATRIX_3X2_F mb = mmul(m, base); rt->SetTransform(&mb);
-    col(0, 0, 0, 0.35f); fillRR(x - 1, y + 2, W + 2, h + 2, 15);  // sombra
-    col(0.165f, 0.165f, 0.175f); fillRR(x, y, W, h, 14);
-    col(1, 1, 1, 0.1f); D2D1_ROUNDED_RECT rr{{x, y, x + W, y + h}, 14, 14}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+    float h = folderHeight();
+    float acx = (fldAnchor.left + fldAnchor.right) / 2;
+    float x = std::clamp(acx - FLD_W / 2, 8.f, dW - 8 - FLD_W), y = barTop - 12 - h;
+    float a = easeOut(tw(24, 1.f, 20)), ga = gA; gA = ga * a;
+    D2D1_MATRIX_3X2_F base; popupBegin(acx, y + h + 8, a, 0.86f, base);  // crece desde la app
+    popupCard(x, y, FLD_W, h, 14);
     std::wstring app = tileName(t);
     if (ID2D1Bitmap* b = tileIcon(t)) { D2D1_RECT_F d{x + 12, y + 8, x + 28, y + 24}; rt->DrawBitmap(b, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); }
-    col(1, 1, 1, 0.75f); text(app, fSmall, x + 34, y + 6, W - 34 - 90, 20);
-    col(1, 1, 1, 0.38f); text(std::to_wstring(n) + L" ventanas", fTiny, x + W - 100, y + 6, 88, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    col(1, 1, 1, 0.08f); fillRR(x + 8, y + HD - 1, W - 16, 1, 0.5f);
+    col(1, 1, 1, 0.75f); text(app, fSmall, x + 34, y + 6, FLD_W - 34 - 90, 20);
+    col(1, 1, 1, 0.38f); text(std::to_wstring(n) + L" ventanas", fTiny, x + FLD_W - 100, y + 6, 88, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    col(1, 1, 1, 0.08f); fillRR(x + 8, y + FLD_HD - 1, FLD_W - 16, 1, 0.5f);
     for (int k = 0; k < rows; k++) {
         int i = fldScroll + k, id = H_FOLD + k;
         HWND w = fldWins[i];
-        float ry = y + HD + 2 + k * RH;
-        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, W - 10, RH - 2, 9);
+        float ry = y + FLD_HD + 2 + k * FLD_RH;
+        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, FLD_W - 10, FLD_RH - 2, 9);
         bool act = w == fgAtOpen, mini = IsIconic(w) != 0;
         // número (con el teclado: pulsarlo abre esa ventana)
-        float bx = x + 13, by = ry + (RH - 2) / 2 - 9;
+        float bx = x + 13, by = ry + (FLD_RH - 2) / 2 - 9;
         if (act) colC(ACC()); else col(1, 1, 1, 0.12f + 0.06f * hv(id));
         fillRR(bx, by, 18, 18, 5.5f);
         col(1, 1, 1, i < 9 ? 0.95f : 0.5f); textN(std::to_wstring(i + 1), fTiny, bx, by, 18, 18, DWRITE_TEXT_ALIGNMENT_CENTER);
-        float tw_ = W - 46 - 12 - (mini ? 68 : 0);
+        float tw_ = FLD_W - 46 - 12 - (mini ? 68 : 0);
         std::wstring ttl = IsWindow(w) ? folderTitle(w, app) : L"(cerrada)";
-        col(1, 1, 1, mini ? 0.5f : 0.92f); text(ttl.empty() ? app : ttl, fSmall, x + 40, ry, tw_, RH - 2);
-        if (mini) { col(1, 1, 1, 0.32f); text(L"minimizada", fTiny, x + W - 12 - 66, ry, 62, RH - 2, DWRITE_TEXT_ALIGNMENT_TRAILING); }
-        addHit(x + 5, ry, W - 10, RH - 2, id);
+        col(1, 1, 1, mini ? 0.5f : 0.92f); text(ttl.empty() ? app : ttl, fSmall, x + 40, ry, tw_, FLD_RH - 2);
+        if (mini) { col(1, 1, 1, 0.32f); text(L"minimizada", fTiny, x + FLD_W - 12 - 66, ry, 62, FLD_RH - 2, DWRITE_TEXT_ALIGNMENT_TRAILING); }
+        addHit(x + 5, ry, FLD_W - 10, FLD_RH - 2, id);
     }
     if (n > FLD_ROWS) {  // barra de desplazamiento
-        float th = rows * RH - 4, ty = y + HD + 4, kh = std::max(16.f, th * FLD_ROWS / n), ky = ty + (th - kh) * fldScroll / (float)(n - FLD_ROWS);
-        col(1, 1, 1, 0.2f); fillRR(x + W - 4.5f, ky, 2.5f, kh, 1.25f);
+        float th = rows * FLD_RH - 4, ty = y + FLD_HD + 4, kh = std::max(16.f, th * FLD_ROWS / n), ky = ty + (th - kh) * fldScroll / (float)(n - FLD_ROWS);
+        col(1, 1, 1, 0.2f); fillRR(x + FLD_W - 4.5f, ky, 2.5f, kh, 1.25f);
     }
     rt->SetTransform(&base);
     gA = ga;
-    addHit(ox, oy, EW, EH, H_FOLD_BG);  // un clic fuera la cierra
-}
-// tras cada dibujado: vista previa de lo que tiene el ratón (wx, wy, wh = ventana de la isla en pantalla)
-//  - una app abierta del dock: todas sus ventanas, con su título (como la barra de tareas)
-//  - una fila de la carpeta: esa ventana
-static void updatePreview(int wx, int wy, int wh, bool canShow) {
-    std::vector<HWND> want; std::vector<std::wstring> titles; float rcx = 0;
-    if (canShow && expanded && visible && view == 0 && sw.settled() && sh.settled()) {
-        if (fldTile >= 0) {
-            if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 22) > 0.98f) {
-                int i = fldScroll + hoverId - H_FOLD;
-                if (i < (int)fldWins.size())
-                    for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); rcx = (ht.r.left + ht.r.right) / 2; break; }
-            }
-        } else if (ctxTile < 0 && hoverId >= H_APP && hoverId < H_APP + (int)tiles.size()) {
-            const Tile& t = tiles[hoverId - H_APP];
-            if (t.run >= 0 && t.run < (int)running.size()) {
-                for (auto& ht : hits) if (ht.id == hoverId) { rcx = (ht.r.left + ht.r.right) / 2; break; }
-                want = running[t.run].wins;
-                std::stable_sort(want.begin(), want.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
-                if (want.size() > 8) want.resize(8);
-                std::wstring app = tileName(t);
-                for (HWND w : want) { std::wstring tt = folderTitle(w, app); titles.push_back(tt.empty() ? app : tt); }
-            }
-        }
-    }
-    if (want.empty()) { prevPending.clear(); KillTimer(gHwnd, T_PREVIEW); if (!prevSrcs.empty()) hidePreview(); return; }
-    int cx = wx + (int)(rcx * scale), bottom = wy + wh - (int)(M * scale);
-    if (!prevSrcs.empty()) { showPreview(want, titles, cx, bottom); return; }  // ya había una: cambia al momento
-    // la primera espera un poco, para que no salte al pasar el ratón de largo
-    ULONGLONG now = nowMs();
-    if (want != prevPending) { prevPending = want; prevPendingAt = now; }
-    if (now - prevPendingAt >= 350) showPreview(want, titles, cx, bottom);
-    else SetTimer(gHwnd, T_PREVIEW, (UINT)(350 - (now - prevPendingAt)) + 15, nullptr);
 }
 
 // ---------------------------------------------------------------- pestaña Herramientas
@@ -3470,7 +3375,7 @@ static void drawGeneral(float x, float y, float w, float h, int idx) {
         {L"Iniciar con Windows", cfg.autostart, H_SET}, {L"Abrir al pasar el ratón", cfg.hoverOpen, H_SET + 1},
         {L"Rayita si hay una ventana debajo", cfg.discreetOn, H_SET + 6}, {L"Ocultar en pantalla completa", cfg.hideFull, H_SET + 2},
         {L"Animar ecualizador", cfg.eq, H_SET + 3}, {L"Mostrar batería", cfg.battery, H_SET + 4},
-        {L"Ocultar barra de tareas", cfg.hideTaskbar, H_SET + 7}};
+        {L"Dock en vez de la barra", cfg.hideTaskbar, H_SET + 7}};
     for (int i = 0; i < 7; i++) {
         float ry = y + 42 + i * 24.5f;
         col(1, 1, 1, 0.9f); text(r[i].l, fSmall, x + 16, ry - 9, w - 78, 18);
@@ -3490,7 +3395,7 @@ static void drawCalSettings(float x, float y, float w, float h, int idx) {
     int sel = cfg.alertMins <= 15 ? 0 : cfg.alertMins <= 30 ? 1 : 2;
     segmented(x + 14, y + 92, w - 28, 26, L3, 3, sel, 0, H_SEG_ALERT, cfg.alerts ? 1.f : 0.4f);
     button(x + 14, y + 132, w - 28, 28, L"Editar calendarios", H_EDIT_CAL);
-    button(x + 14, y + 166, w - 28, 28, L"Editar atajos", H_EDIT_APPS);
+    button(x + 14, y + 166, w - 28, 28, L"Editar apps del dock", H_EDIT_APPS);
 }
 static void drawLook(float x, float y, float w, float h, int idx) {
     beginCard(idx, y); card(x, y, w, h);
@@ -3688,12 +3593,9 @@ static void drawTray(float x, float y, float w, float h) {
 static void drawView(int v, float ox, float y) {
     float h = EH - 44 - 12, x = ox + 12;
     if (v == 0) {
-        drawMusic(x, y, 252, h, 0); x += 262;
-        drawCalendar(x, y, 202, h, 1); x += 212;
-        drawStats(x, y, 110, h, 2); x += 120;
-        drawApps(x, y, ox + EW - 12 - x, h, 3);
-        if (ctxTile >= 0) { size_t n0 = hits.size(); drawCtx(ox, y - 44); std::rotate(hits.begin(), hits.begin() + n0, hits.end()); }
-        if (fldTile >= 0) { size_t n0 = hits.size(); drawFolder(ox, y - 44); std::rotate(hits.begin(), hits.begin() + n0, hits.end()); }
+        drawMusic(x, y, 290, h, 0); x += 300;
+        drawCalendar(x, y, 236, h, 1); x += 246;
+        drawStats(x, y, ox + EW - 12 - x, h, 2);
     } else if (v == V_TOOLS) {
         drawTimer(x, y, 250, h, 0); x += 260;
         drawNextEvent(x, y, 210, h, 1); x += 220;
@@ -3883,7 +3785,6 @@ static void render() {
     UpdateLayeredWindow(gHwnd, nullptr, &dst, &sz, memDC, &src, 0, &bf, ULW_ALPHA);
     if (!animating && (!springsSettled() || tweensActive())) startAnim();
     updateTick();
-    updatePreview(dst.x, dst.y, H, !peeking);
 }
 
 // ---------------------------------------------------------------- animación (al ritmo de la pantalla)
@@ -3930,8 +3831,9 @@ static void onSettled() {
         for (auto it = tweens.begin(); it != tweens.end();) { if (it->first >= 100000 && it->first < 200000) it = tweens.erase(it); else ++it; }
         SafeRelease(vol); briStop(); SafeRelease(cacheRT); cacheValid = false;
         std::vector<SApp>().swap(sApps); std::vector<int>().swap(sRes); sLoaded = false;
-        running.clear(); tiles.clear(); trayList.clear(); freeTrayBmps(); closeLists(); radioAsked = false; std::vector<AudioDev>().swap(devs); std::vector<WNet>().swap(nets); std::vector<BtDev>().swap(bts);
-        setEco(true); SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
+        trayList.clear(); freeTrayBmps(); closeLists(); radioAsked = false; std::vector<AudioDev>().swap(devs); std::vector<WNet>().swap(nets); std::vector<BtDev>().swap(bts);
+        if (!dAnim) setEco(true);
+        SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);
     }
 }
 static void frame() {
@@ -3962,12 +3864,11 @@ static void setExpanded(bool e, int v = -1) {
         SYSTEMTIME st; GetLocalTime(&st); calY = st.wYear; calM = st.wMonth; selDay = 0; twSnap(8, 0);
         FILETIME fs = fileStamp(appsFile);
         if (CompareFileTime(&fs, &appsStamp) != 0) loadApps();
-        loadIcons(); refreshTiles(); appPage = 0; twSnap(19, 0);
         sw.t = EW; sh.t = EH; sr.t = ER;
         SetEvent(gWake);
     } else {
         gExpandedA = false;
-        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; ctxTile = -1; closeFolder(true); collapsedTargets();
+        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; collapsedTargets();
     }
     startAnim();
 }
@@ -4061,7 +3962,590 @@ static void ensureTopmost() {
         if (IntersectRect(&x, &r, &me)) { SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }
     }
 }
-static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (visible) ensureTopmost(); if (expanded && !sActive && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
+static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (visible) ensureTopmost(); dockOnForeground(); }
+
+// ================================================================ dock (sustituye a la barra de tareas)
+// Barra de apps abajo en el centro, de cristal translúcido, con lupa al pasar el ratón, saltos al abrir una app,
+// entradas y salidas animadas y botón de Inicio. Es otra ventana por capas, pero se dibuja con el mismo render
+// target de la isla (BindDC a su propia imagen) y solo cuando algo cambia: en reposo no gasta nada.
+// Se esconde hacia abajo cuando la ventana activa lo tapa y vuelve al llevar el ratón abajo del todo.
+enum { DT_REFRESH = 1, DT_COVER, DT_HIDE, DT_PREVIEW };
+enum { D_WIN = 3000, D_ITEM = 3001 };  // zonas de clic del dock: D_ITEM + índice
+static const UINT WM_APP_DOCKAPPS = WM_APP + 40;
+static const float D_S = 48, D_GAP = 7, D_PAD = 9, D_SEPW = 13, D_BM = 8, D_MAG = 1.6f, D_LABEL = 40, D_R = 20;
+static const float D_OP[3] = {0.82f, 0.58f, 0.40f};  // opacidad del fondo según Aspecto > Fondo (sólido, medio, cristal)
+struct DockItem {
+    std::wstring key, name; ID2D1Bitmap* bmp = nullptr;  // icono con referencia propia: así se puede animar la salida
+    int kind = 0;   // 0 app, 1 botón de Inicio, 2 separador
+    int tile = -1;  // índice en tiles (-1 mientras se va)
+    bool leaving = false;
+    float vis = 0, dot = 0, hov = 0, prs = 0;     // animaciones
+    float x = 0, w = 0, top = 0, cx = 0;          // dónde se dibujó (coordenadas del dock)
+    ULONGLONG bounceAt = 0; int bounceKind = 0; float bounceEnd = 0;  // 1 abriéndose, 2 pide atención
+};
+static std::vector<DockItem> dItems;
+static HDC dDC; static HBITMAP dDib, dOldBmp; static int dDibW = 0, dDibH = 0;
+static std::vector<Hit> dHits; static int dHover = H_NONE, dPress = H_NONE; static std::map<int, Tween> dTweens;
+static bool dOn = false, dShown = true, dCovered = false, dFull = false, dMouseIn = false, dPendingRefresh = false;
+static int hitAt(LPARAM lp);
+static Spring dHideS{0, 0, 0};
+static float dMag = 0, dMx = 0, dMxT = 0;
+static float dW = 0, dH = 0, dRestW = 0, dBarH = 0, dLabelTop = 0, dFolderTop = 0;
+static int dWinX = 0, dWinY = 0;
+static LARGE_INTEGER dLast; static UINT WM_SHELLHOOK = 0;
+static HWINEVENTHOOK dLocHook = nullptr; static DWORD dLocPid = 0; static HWND dWatchFg = nullptr, dPrevFg = nullptr;
+
+// Mientras se dibuja o se atiende el ratón del dock, las zonas de clic, el ratón y las micro-animaciones
+// compartidas (hv, prs, tw) son las del dock: así el menú y la carpeta reutilizan el código de la isla.
+struct DockCtx {
+    float ga; bool hs;
+    DockCtx() { hits.swap(dHits); std::swap(hoverId, dHover); std::swap(pressId, dPress); tweens.swap(dTweens); ga = gA; hs = hitsOn; gA = 1; hitsOn = true; }
+    ~DockCtx() { hits.swap(dHits); std::swap(hoverId, dHover); std::swap(pressId, dPress); tweens.swap(dTweens); gA = ga; hitsOn = hs; }
+};
+static float approach(float x, float t, float k, float dt) { x += (t - x) * (1 - expf(-dt * k)); return fabsf(x - t) < 0.002f ? t : x; }
+
+static void dockKick() {
+    if (!dOn || !dockHwnd) return;
+    if (!dAnim) { dAnim = true; QueryPerformanceCounter(&dLast); setEco(false); }
+}
+static void dockRefreshSoon(UINT ms) { if (dockHwnd) SetTimer(dockHwnd, DT_REFRESH, ms, nullptr); }
+static void dockDropBitmaps() { for (auto& it : dItems) SafeRelease(it.bmp); dockRefreshSoon(20); }
+static bool dockPopup() { return ctxTile >= 0 || fldTile >= 0; }
+
+// --- qué hay en el dock
+static std::wstring dockKey(const Tile& t) { return t.pin >= 0 ? L"p:" + lowerW(apps[t.pin].target) + L"|" + apps[t.pin].args : L"r:" + running[t.run].key; }
+static void dockSync() {
+    struct Want { std::wstring key; int kind, tile; };
+    std::vector<Want> want;
+    want.push_back({L"win", 1, -1});
+    want.push_back({L"sep1", 2, -1});
+    std::set<std::wstring> seen;
+    for (int i = 0; i < (int)tiles.size(); i++) {
+        if (i == nPinnedTiles) want.push_back({L"sep2", 2, -1});  // entre las fijadas y las demás abiertas
+        std::wstring k = dockKey(tiles[i]);
+        while (seen.count(k)) k += L"#";
+        seen.insert(k);
+        want.push_back({k, 0, i});
+    }
+    std::vector<DockItem> out; std::vector<bool> used(dItems.size(), false);
+    for (auto& w : want) {
+        DockItem it; bool found = false;
+        for (size_t j = 0; j < dItems.size(); j++)
+            if (!used[j] && dItems[j].key == w.key) { it = dItems[j]; used[j] = true; found = true; break; }
+        if (!found) { it.key = w.key; it.vis = 0; }
+        it.kind = w.kind; it.tile = w.tile; it.leaving = false;
+        if (w.kind == 0) {
+            const Tile& t = tiles[w.tile];
+            it.name = tileName(t);
+            ID2D1Bitmap* b = tileIcon(t);
+            if (b != it.bmp) { if (b) b->AddRef(); SafeRelease(it.bmp); it.bmp = b; }
+        } else if (w.kind == 1) it.name = L"Inicio";
+        out.push_back(it);
+    }
+    // las que ya no están se quedan en su sitio encogiéndose hasta desaparecer
+    int pos = -1;
+    for (size_t j = 0; j < dItems.size(); j++) {
+        if (used[j]) {
+            for (size_t k = 0; k < out.size(); k++) if (out[k].key == dItems[j].key) { pos = (int)k; break; }
+            continue;
+        }
+        DockItem g = dItems[j]; g.leaving = true; g.tile = -1; g.bounceAt = 0;
+        out.insert(out.begin() + (pos + 1), g); pos++;
+    }
+    dItems.swap(out);
+    if (fldTile >= (int)tiles.size()) fldTile = -1;
+    if (ctxTile >= (int)tiles.size()) ctxTile = -1;
+}
+static void dockRefresh() {
+    if (!dOn) return;
+    if (dockPopup()) { dPendingRefresh = true; return; }  // con un menú abierto los índices no se tocan
+    dPendingRefresh = false;
+    FILETIME fs = fileStamp(appsFile);
+    if (CompareFileTime(&fs, &appsStamp) != 0) loadApps();
+    loadIcons(); refreshTiles(); dockSync(); dockKick();
+    SetCoalescableTimer(gHwnd, T_TRIM, 30000, nullptr, 5000);  // devolver la memoria de cargar iconos
+}
+static void dockAppsChanged() {
+    ctxTile = -1; closeFolder(false);
+    loadApps(); loadIcons(); dockRefresh();
+}
+
+// --- tapado, pantalla completa y visibilidad
+static bool dockCovered() {
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == dockHwnd || fg == gHwnd || fg == prevWnd) return dCovered;  // sin cambios mientras se usa islita
+    if (fg == GetDesktopWindow() || fg == GetShellWindow() || IsIconic(fg) || !IsWindowVisible(fg)) return false;
+    wchar_t cls[64]; GetClassNameW(fg, cls, 64);
+    if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || isTray(fg)) return false;
+    int cloaked = 0; DwmGetWindowAttribute(fg, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+    if (cloaked) return false;
+    RECT r;
+    if (FAILED(DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r)) && !GetWindowRect(fg, &r)) return false;
+    int cx = (mon.left + mon.right) / 2, half = (int)(dRestW / 2 * scale);
+    int top = mon.bottom - (int)((D_BM + dBarH) * scale);
+    return r.left < cx + half && r.right > cx - half && r.bottom > top && r.top < mon.bottom;
+}
+static void dockUpdateShown() {
+    bool want = !dCovered || dMouseIn || dockPopup();
+    if (want == dShown) return;
+    dShown = want;
+    if (want) SetWindowPos(dockHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    else hidePreview();
+    dockKick();
+}
+static void dockCheckCover() {
+    if (!dOn || !dockHwnd) return;
+    bool full = cfg.hideFull && foregroundIsFullscreen();
+    if (full != dFull) {
+        dFull = full;
+        if (full) { hidePreview(); ShowWindow(dockHwnd, SW_HIDE); }
+        else { ShowWindow(dockHwnd, SW_SHOWNOACTIVATE); dockKick(); }
+    }
+    bool cov = dockCovered();
+    if (cov != dCovered) { dCovered = cov; dockUpdateShown(); }
+}
+// solo se vigila el proceso de la ventana activa: al moverla, maximizarla o restaurarla se mira si tapa el dock
+static void CALLBACK dockLocEvent(HWINEVENTHOOK, DWORD, HWND h, LONG obj, LONG child, DWORD, DWORD) {
+    if (h && h == dWatchFg && obj == OBJID_WINDOW && child == CHILDID_SELF) SetTimer(dockHwnd, DT_COVER, 40, nullptr);
+}
+static void dockWatch(HWND fg) {
+    dWatchFg = fg;
+    DWORD pid = 0; if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid == dLocPid) return;
+    if (dLocHook) { UnhookWinEvent(dLocHook); dLocHook = nullptr; }
+    dLocPid = pid;
+    if (pid && pid != GetCurrentProcessId())
+        dLocHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, dockLocEvent, pid, 0, WINEVENT_OUTOFCONTEXT);
+}
+static void dockOnForeground() {
+    if (!dOn || !dockHwnd) return;
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == dockHwnd || fg == gHwnd || fg == prevWnd) return;
+    fgAtOpen = fg;
+    dockWatch(fg);
+    bool known = false;
+    for (auto& r : running) if (std::find(r.wins.begin(), r.wins.end(), fg) != r.wins.end()) { known = true; break; }
+    if (!known && isTaskWindow(fg)) dockRefreshSoon(60);  // ventana nueva que aún no estaba
+    for (auto& it : dItems)  // si pedía atención y ya se ha ido a ella, deja de saltar
+        if (it.bounceKind == 2 && it.tile >= 0 && tiles[it.tile].run >= 0) {
+            auto& w = running[tiles[it.tile].run].wins;
+            if (std::find(w.begin(), w.end(), fg) != w.end()) it.bounceEnd = 0.001f;
+        }
+    dockCheckCover();
+    dockKick();
+}
+
+// --- dibujo
+static void dockEnsureDib(int w, int h) {
+    if (w <= dDibW && h <= dDibH && dDib) return;
+    w = std::max(w, dDibW); h = std::max(h, dDibH);
+    if (dDib) { SelectObject(dDC, dOldBmp); DeleteObject(dDib); }
+    if (!dDC) dDC = CreateCompatibleDC(nullptr);
+    BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
+    void* bits; dDib = CreateDIBSection(dDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    dOldBmp = (HBITMAP)SelectObject(dDC, dDib);
+    dDibW = w; dDibH = h;
+}
+static float dockBounce(DockItem& it, float S) {
+    if (!it.bounceAt) return 0;
+    const float P = 0.62f;
+    float t = (nowMs() - it.bounceAt) / 1000.f, p = fmodf(t, P) / P;
+    float hgt = S * (it.bounceKind == 2 ? 0.5f : 0.42f);
+    return -hgt * 4 * p * (1 - p);
+}
+static void dockIcon(DockItem& it, float x, float y, float s, float op) {
+    if (it.kind == 1) {  // botón de Inicio: cristal con el logo de Windows
+        float r = s * 0.24f;
+        col(1, 1, 1, (0.13f + 0.08f * it.hov) * op); fillRR(x, y, s, s, r);
+        col(1, 1, 1, 0.16f * op); D2D1_ROUNDED_RECT rr{{x + 0.5f, y + 0.5f, x + s - 0.5f, y + s - 0.5f}, r, r}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+        float ga = gA; gA = ga * op;
+        winLogo(x + s / 2, y + s / 2, s * 0.44f, mix(WINBLUE, {1, 1, 1, 1}, 0.2f * it.hov));
+        gA = ga;
+        return;
+    }
+    op *= 1 - 0.35f * it.prs;  // pulsado: se apaga un poco
+    if (it.bmp) { D2D1_RECT_F d{x, y, x + s, y + s}; rt->DrawBitmap(it.bmp, &d, op * gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); }
+    else {
+        col(0.3f, 0.3f, 0.33f, op); fillRR(x, y, s, s, s * 0.22f);
+        col(1, 1, 1, 0.9f * op); text(it.name.substr(0, 1), fTitle, x, y, s, s, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+}
+static void dockRenderIn() {
+    if (!dockHwnd || !rt || !dOn) return;
+    hits.clear();
+    float monWd = (mon.right - mon.left) / scale;
+    // tamaño de los iconos: si no caben, se encogen
+    auto baseW = [&](float S) {
+        float w = 2 * D_PAD; bool first = true;
+        for (auto& it : dItems) { w += (it.kind == 2 ? D_SEPW : S) * it.vis + (first ? 0 : D_GAP * it.vis); first = false; }
+        return w;
+    };
+    float S = D_S, bw = baseW(S);
+    if (bw > monWd - 40) { S = std::max(26.f, S * (monWd - 40) / bw); bw = baseW(S); }
+    float barH = S + 2 * D_PAD + 4;
+    float popH = ctxTile >= 0 ? ctxBuild() : fldTile >= 0 ? folderHeight() : 0;
+    float topSpace = std::max(S * (D_MAG - 1) + D_LABEL, popH + 24);
+    dW = std::min(monWd, bw + 360); dH = D_BM + barH + topSpace + 8;
+    dRestW = bw; dBarH = barH;
+    int Wp = (int)ceilf(dW * scale), Hp = (int)ceilf(dH * scale);
+    dockEnsureDib(Wp, Hp);
+    float hideOff = clampf(dHideS.x, 0, 1.2f) * (barH + D_BM + 14);
+    float barTop = dH - D_BM - barH + hideOff, iconBase = barTop + D_PAD + S;
+    float cx = dW / 2;
+
+    // posiciones: primero sin lupa (para medir distancias) y luego con ella
+    std::vector<float> bc(dItems.size()), sc(dItems.size(), 1.f), ww(dItems.size());
+    { float x = cx - bw / 2 + D_PAD; bool first = true;
+      for (size_t i = 0; i < dItems.size(); i++) {
+          auto& it = dItems[i]; if (!first) x += D_GAP * it.vis; first = false;
+          float iw = (it.kind == 2 ? D_SEPW : S) * it.vis; bc[i] = x + iw / 2; x += iw;
+      } }
+    float R = S * 3.1f, total = 2 * D_PAD;
+    for (size_t i = 0; i < dItems.size(); i++) {
+        auto& it = dItems[i];
+        if (it.kind != 2 && dMag > 0.001f) {
+            float d = fabsf(dMx - bc[i]);
+            float f = d < R ? 0.5f * (1 + cosf((float)M_PI * d / R)) : 0.f;
+            sc[i] = 1 + (D_MAG - 1) * dMag * f;
+        }
+        ww[i] = (it.kind == 2 ? D_SEPW : S) * it.vis * sc[i];
+        total += ww[i] + (i ? D_GAP * it.vis : 0);
+    }
+    float barL = cx - total / 2, barR = cx + total / 2;
+
+    RECT rc{0, 0, Wp, Hp};
+    dcrt->BindDC(dDC, &rc);
+    rt->BeginDraw();
+    D2D1_COLOR_F clear{0, 0, 0, 0}; rt->Clear(&clear);
+    D2D1_MATRIX_3X2_F I{1, 0, 0, 1, 0, 0}; rt->SetTransform(&I);
+    gA = 1;
+    // franjas casi invisibles que reciben el ratón: el borde de abajo (para hacerlo salir) y, con el ratón dentro,
+    // la zona de la lupa (si no, entre dos iconos grandes el ratón "saldría" del dock)
+    col(0, 0, 0, 0.004f);
+    { D2D1_RECT_F z{cx - bw / 2, dH - (dShown ? D_BM : 2.f), cx + bw / 2, dH}; rt->FillRectangle(&z, br); }
+    if (dMouseIn && dHideS.x < 0.5f) { D2D1_RECT_F z{barL, barTop - S * (D_MAG - 1) * dMag - 6, barR, dH}; rt->FillRectangle(&z, br); }
+
+    if (dHideS.x < 1.05f) {
+        // sombra suave y cristal
+        float r = std::min(D_R, barH / 2);
+        for (int i = 4; i >= 1; i--) { float g = i * 3.f; col(0, 0, 0, 0.045f); fillRR(barL - g, barTop - g + 4, total + 2 * g, barH + 2 * g, r + g); }
+        col(0.07f, 0.07f, 0.08f, D_OP[cfg.opacity % 3]); fillRR(barL, barTop, total, barH, r);
+        col(1, 1, 1, 0.045f); fillRR(barL + 1, barTop + 1, total - 2, barH * 0.48f, r - 1);  // brillo de arriba
+        col(0, 0, 0, 0.35f); { D2D1_ROUNDED_RECT o{{barL - 0.5f, barTop - 0.5f, barR + 0.5f, barTop + barH + 0.5f}, r + 0.5f, r + 0.5f}; rt->DrawRoundedRectangle(&o, br, 1, nullptr); }
+        col(1, 1, 1, 0.13f); { D2D1_ROUNDED_RECT in{{barL + 0.5f, barTop + 0.5f, barR - 0.5f, barTop + barH - 0.5f}, r - 0.5f, r - 0.5f}; rt->DrawRoundedRectangle(&in, br, 1, nullptr); }
+
+        // iconos (alineados por abajo: al agrandarse crecen hacia arriba, como en el Mac)
+        float x = barL + D_PAD; int hoverIdx = -1; dLabelTop = barTop - 30;
+        for (size_t i = 0; i < dItems.size(); i++) {
+            auto& it = dItems[i];
+            if (i) x += D_GAP * it.vis;
+            float w = ww[i];
+            it.x = x; it.w = w; it.cx = x + w / 2;
+            if (it.kind == 2) {
+                col(1, 1, 1, 0.2f * it.vis); fillRR(x + w / 2 - 0.6f, barTop + D_PAD + 5, 1.2f, S - 10, 0.6f);
+            } else if (it.vis > 0.01f) {
+                float s = S * sc[i] * (0.35f + 0.65f * it.vis) * (1 - 0.06f * it.prs);
+                float ix = x + (w - s) / 2, iy = iconBase - s + dockBounce(it, S);
+                it.top = iy;
+                dockIcon(it, ix, iy, s, it.vis);
+                // puntito de abierta (del color de acento si es la app activa); uno por ventana, hasta 3
+                if (it.dot > 0.01f && it.tile >= 0 && tiles[it.tile].run >= 0) {
+                    const RunApp& ra = running[tiles[it.tile].run];
+                    bool act = std::find(ra.wins.begin(), ra.wins.end(), fgAtOpen) != ra.wins.end();
+                    float dy = barTop + barH - 5.5f, dcx = x + w / 2;
+                    int nd = std::min((int)ra.wins.size(), 3);
+                    if (act) colC(ACC(), it.dot); else col(1, 1, 1, 0.75f * it.dot);
+                    if (nd <= 1) { float dw = (act ? 10.f : 4.f) * it.dot; fillRR(dcx - dw / 2, dy - 2, dw, 4, 2); }
+                    else { float gp = 6.f; for (int k = 0; k < nd; k++) circle(dcx + (k - (nd - 1) / 2.f) * gp, dy, 1.9f * it.dot); }
+                }
+                if (!it.leaving) addHit(x - D_GAP / 2, std::min(iy, iconBase - S) - 4, w + D_GAP, dH - (std::min(iy, iconBase - S) - 4), it.kind == 1 ? D_WIN : D_ITEM + (int)i);
+                if (it.hov > 0.01f && !it.leaving && (hoverIdx < 0 || it.hov > dItems[hoverIdx].hov)) hoverIdx = (int)i;
+            }
+            x += w;
+        }
+        // nombre encima del icono con el ratón
+        if (hoverIdx >= 0 && !dockPopup()) {
+            auto& it = dItems[hoverIdx];
+            float a = easeOut(it.hov);
+            float tw_ = std::min(260.f, textWidth(it.name, fSmall) + 22), th = 26;
+            float lx = clampf(it.cx - tw_ / 2, 4, dW - 4 - tw_), ly = it.top - 12 - th + (1 - a) * 5;
+            dLabelTop = ly;
+            col(0.11f, 0.11f, 0.12f, 0.92f * a); fillRR(lx, ly, tw_, th, 9);
+            col(1, 1, 1, 0.12f * a); { D2D1_ROUNDED_RECT rr{{lx + 0.5f, ly + 0.5f, lx + tw_ - 0.5f, ly + th - 0.5f}, 9, 9}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr); }
+            col(1, 1, 1, 0.95f * a); text(it.name, fSmall, lx + 11, ly, tw_ - 22, th, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        // menú o carpeta: van por encima de todo (y sus zonas de clic primero)
+        if (dockPopup()) {
+            size_t n0 = hits.size();
+            if (ctxTile >= 0) drawCtx(dW, barTop);
+            else { drawFolder(dW, barTop); dFolderTop = barTop - 12 - folderHeight(); }
+            std::rotate(hits.begin(), hits.begin() + n0, hits.end());
+        }
+    }
+    gA = 1;
+    if (rt->EndDraw() == D2DERR_RECREATE_TARGET) { createTarget(); return; }
+    dWinX = mon.left + ((mon.right - mon.left) - Wp) / 2; dWinY = mon.bottom - Hp;
+    POINT dst{dWinX, dWinY}; SIZE sz{Wp, Hp}; POINT src{0, 0};
+    BLENDFUNCTION bf{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(dockHwnd, nullptr, &dst, &sz, dDC, &src, 0, &bf, ULW_ALPHA);
+}
+static void dockRender() { DockCtx c; dockRenderIn(); }
+
+// --- animación: avanza todo y dice si queda algo moviéndose
+static bool dockStepIn(float dt) {
+    bool busy = false;
+    dHideS.t = dShown ? 0.f : 1.f;
+    step(dHideS, dt / 1.0f, 190.f, dShown ? 0.72f : 1.f);
+    if (!dHideS.settled()) busy = true;
+    float magT = dMouseIn && !dockPopup() && dShown ? 1.f : 0.f;
+    dMag = approach(dMag, magT, 13, dt); if (dMag != magT) busy = true;
+    dMx = approach(dMx, dMxT, 30, dt); if (dMx != dMxT && dMag > 0) busy = true;
+    stepTweens(dt); if (tweensActive()) busy = true;
+    ULONGLONG now = nowMs();
+    for (size_t i = 0; i < dItems.size();) {
+        auto& it = dItems[i];
+        int id = it.kind == 1 ? D_WIN : D_ITEM + (int)i;
+        bool run = it.tile >= 0 && tiles[it.tile].run >= 0;
+        float o[4] = {it.vis, it.dot, it.hov, it.prs};
+        it.vis = approach(it.vis, it.leaving ? 0.f : 1.f, 9, dt);
+        it.dot = approach(it.dot, run && !it.leaving ? 1.f : 0.f, 10, dt);
+        it.hov = approach(it.hov, hoverId == id && !dockPopup() ? 1.f : 0.f, 16, dt);
+        it.prs = approach(it.prs, pressId == id ? 1.f : 0.f, 30, dt);
+        if (o[0] != it.vis || o[1] != it.dot || o[2] != it.hov || o[3] != it.prs) busy = true;
+        if (it.bounceAt) {
+            const float P = 0.62f; float t = (now - it.bounceAt) / 1000.f;
+            // abriéndose: hasta que la app tenga ventana (máx. 8 s); atención: 3 saltos o hasta que se vaya a ella
+            if (!it.bounceEnd && ((it.bounceKind == 1 && (run || t > 8)) || (it.bounceKind == 2 && t > 3 * P))) it.bounceEnd = ceilf(t / P) * P;
+            if (it.bounceEnd == 0.001f) it.bounceEnd = ceilf(t / P) * P;
+            if (it.bounceEnd && t >= it.bounceEnd) { it.bounceAt = 0; it.bounceEnd = 0; it.bounceKind = 0; }
+            busy = true;
+        }
+        if (it.leaving && it.vis <= 0.002f) { SafeRelease(it.bmp); dItems.erase(dItems.begin() + i); busy = true; continue; }
+        i++;
+    }
+    return busy;
+}
+static void dockFrame() {
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    float dt = clampf((float)(now.QuadPart - dLast.QuadPart) / qpf.QuadPart, 0.001f, 1 / 30.f);
+    dLast = now;
+    bool busy;
+    { DockCtx c; busy = dockStepIn(dt); dockRenderIn(); }
+    if (!busy) { dAnim = false; if (!animating && !expanded) setEco(true); }
+}
+static void dockStartBounce(int i, int kind) {
+    if (i < 0 || i >= (int)dItems.size()) return;
+    auto& it = dItems[i];
+    if (it.bounceAt && it.bounceKind >= kind) return;
+    it.bounceAt = nowMs(); it.bounceKind = kind; it.bounceEnd = 0;
+    dockKick();
+}
+
+// --- vista previa de las ventanas de la app con el ratón (o de la fila de la carpeta)
+static void dockPreviewUpdate() {
+    std::vector<HWND> want; std::vector<std::wstring> titles; int cx = 0, edge = 0;
+    {
+        DockCtx c;
+        if (dOn && dShown && dHideS.x < 0.05f && ctxTile < 0) {
+            if (fldTile >= 0) {
+                if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 20) > 0.98f) {
+                    int i = fldScroll + hoverId - H_FOLD;
+                    if (i < (int)fldWins.size())
+                        for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); cx = dWinX + (int)((ht.r.left + ht.r.right) / 2 * scale); edge = dWinY + (int)(dFolderTop * scale); break; }
+                }
+            } else if (hoverId >= D_ITEM && hoverId - D_ITEM < (int)dItems.size()) {
+                auto& it = dItems[hoverId - D_ITEM];
+                if (!it.leaving && it.tile >= 0 && tiles[it.tile].run >= 0) {
+                    const Tile& t = tiles[it.tile];
+                    want = running[t.run].wins;
+                    std::stable_sort(want.begin(), want.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
+                    if (want.size() > 8) want.resize(8);
+                    std::wstring app = tileName(t);
+                    for (HWND w : want) { std::wstring tt = folderTitle(w, app); titles.push_back(tt.empty() ? app : tt); }
+                    cx = dWinX + (int)(it.cx * scale); edge = dWinY + (int)((dLabelTop - 2) * scale);
+                }
+            }
+        }
+    }
+    if (want.empty()) { prevPending.clear(); KillTimer(dockHwnd, DT_PREVIEW); if (!prevSrcs.empty()) hidePreview(); return; }
+    if (!prevSrcs.empty()) { showPreview(want, titles, cx, edge); return; }  // ya había una: cambia al momento
+    // la primera espera un poco, para que no salte al pasar el ratón de largo
+    ULONGLONG now = nowMs();
+    if (want != prevPending) { prevPending = want; prevPendingAt = now; }
+    if (now - prevPendingAt >= 450) showPreview(want, titles, cx, edge);
+    else SetTimer(dockHwnd, DT_PREVIEW, (UINT)(450 - (now - prevPendingAt)) + 15, nullptr);
+}
+
+// --- clics
+static void dockClosePopups(bool restoreFocus) {
+    ctxTile = -1; closeFolder(restoreFocus);
+    if (restoreFocus && GetForegroundWindow() == dockHwnd && dPrevFg && IsWindow(dPrevFg)) SetForegroundWindow(dPrevFg);
+    dPrevFg = nullptr;
+    if (dPendingRefresh) dockRefresh();
+    dockUpdateShown(); dockKick();
+}
+static void dockStartMenu() {
+    INPUT in[2]{}; in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_LWIN; in[1] = in[0]; in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+static void dockClick(int id) {  // fuera de DockCtx
+    if (id >= H_CTX && id < H_CTX + 8) {
+        HWND back = dPrevFg; int item = id - H_CTX;
+        if (GetForegroundWindow() == dockHwnd && back && IsWindow(back)) SetForegroundWindow(back);
+        dPrevFg = nullptr;
+        ctxRun(item);
+        dockClosePopups(false);
+        return;
+    }
+    if (id >= H_FOLD && id < H_FOLD + FLD_ROWS) { folderPick(fldScroll + id - H_FOLD); dockClosePopups(false); return; }
+    if (dockPopup()) { dockClosePopups(true); return; }
+    if (id == D_WIN) { dockStartMenu(); return; }
+    int i = id - D_ITEM;
+    if (i < 0 || i >= (int)dItems.size() || dItems[i].tile < 0) return;
+    Tile t = tiles[dItems[i].tile];
+    HWND fg = GetForegroundWindow(); if (fg != dockHwnd && fg != gHwnd) fgAtOpen = fg;
+    if (t.run >= 0 && running[t.run].wins.size() >= 2) {  // varias ventanas: se elige cuál
+        hidePreview();
+        D2D1_RECT_F a{dItems[i].x, dItems[i].top, dItems[i].x + dItems[i].w, dItems[i].top + dItems[i].w};
+        { DockCtx c; openFolder(dItems[i].tile, a); hoverId = H_NONE; }
+        dockUpdateShown();
+    } else if (t.run >= 0) activateRun(running[t.run]);
+    else {
+        App& a = apps[t.pin];
+        ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL);
+        dockStartBounce(i, 1);
+        dockRefreshSoon(1500);
+    }
+    dockKick();
+}
+
+static LRESULT CALLBACK DockProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SHELLHOOK && WM_SHELLHOOK) {
+        int code = (int)(wp & 0x7FFF);
+        if (code == HSHELL_WINDOWCREATED || code == HSHELL_WINDOWDESTROYED || code == 13 /* HSHELL_WINDOWREPLACED */) dockRefreshSoon(150);
+        else if (wp == HSHELL_FLASH) {  // una app pide atención: salta (si no es la activa)
+            HWND w = (HWND)lp;
+            if (w && w != GetForegroundWindow())
+                for (size_t i = 0; i < dItems.size(); i++) {
+                    auto& it = dItems[i];
+                    if (it.tile < 0 || tiles[it.tile].run < 0) continue;
+                    auto& ws = running[tiles[it.tile].run].wins;
+                    if (std::find(ws.begin(), ws.end(), w) != ws.end()) { dockStartBounce((int)i, 2); break; }
+                }
+        }
+        return 0;
+    }
+    switch (msg) {
+    case WM_TIMER:
+        if (wp == DT_REFRESH) { KillTimer(h, DT_REFRESH); dockRefresh(); }
+        else if (wp == DT_COVER) { KillTimer(h, DT_COVER); dockCheckCover(); }
+        else if (wp == DT_HIDE) { KillTimer(h, DT_HIDE); dockUpdateShown(); }
+        else if (wp == DT_PREVIEW) { KillTimer(h, DT_PREVIEW); dockPreviewUpdate(); }
+        return 0;
+    case WM_MOUSEMOVE: {
+        float x = (short)LOWORD(lp) / scale;
+        if (!dMouseIn) {
+            dMouseIn = true; dMx = x;
+            TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0}; TrackMouseEvent(&t);
+            KillTimer(h, DT_HIDE);
+            if (!dShown) dockUpdateShown();
+            FILETIME fs = fileStamp(appsFile); if (CompareFileTime(&fs, &appsStamp) != 0) dockRefresh();  // atajos.txt editado a mano
+        }
+        dMxT = x;        { DockCtx c; int id = hitAt(lp); if (id != hoverId) hoverId = id; }
+        dockPreviewUpdate();
+        dockKick();
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        dMouseIn = false;
+        { DockCtx c; hoverId = H_NONE; }
+        if (fldTile < 0) dockPreviewUpdate();
+        if (dCovered) SetTimer(h, DT_HIDE, 600, nullptr);
+        dockKick();
+        return 0;
+    case WM_LBUTTONDOWN:
+        { DockCtx c; pressId = hitAt(lp); }
+        SetCapture(h); if (fldTile < 0) hidePreview(); prevPending.clear();
+        dockKick();
+        return 0;
+    case WM_LBUTTONUP: {
+        ReleaseCapture();
+        int id, was;
+        { DockCtx c; id = hitAt(lp); was = pressId; pressId = H_NONE; }
+        if (id && id == was) dockClick(id);
+        else if (!id && dockPopup()) dockClosePopups(true);
+        dockKick();
+        return 0;
+    }
+    case WM_RBUTTONUP: {
+        int id; { DockCtx c; id = hitAt(lp); }
+        if (dockPopup()) { dockClosePopups(true); return 0; }
+        if (id == D_WIN) {  // clic derecho en Inicio: el buscador de apps de la isla
+            setExpanded(true, lastTab); startSearch(); render();
+            return 0;
+        }
+        int i = id - D_ITEM;
+        if (i >= 0 && i < (int)dItems.size() && dItems[i].tile >= 0) {
+            HWND fg = GetForegroundWindow(); if (fg != dockHwnd && fg != gHwnd) { fgAtOpen = fg; dPrevFg = fg; }
+            hidePreview(); prevPending.clear();
+            { DockCtx c; ctxTile = dItems[i].tile; ctxAnchor = {dItems[i].x, dItems[i].top, dItems[i].x + dItems[i].w, dItems[i].top + dItems[i].w}; twSnap(20, 0); hoverId = H_NONE; }
+            grabFocusOf(h);  // un clic en otro sitio lo cierra
+            dockUpdateShown(); dockKick();
+        }
+        return 0;
+    }
+    case WM_MBUTTONUP: {  // botón de la rueda: nueva ventana (como en la barra de tareas)
+        int id; { DockCtx c; id = hitAt(lp); }
+        int i = id - D_ITEM;
+        if (i >= 0 && i < (int)dItems.size() && dItems[i].tile >= 0) {
+            std::wstring args, tg = tileLaunchTarget(tiles[dItems[i].tile], &args);
+            ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
+            dockStartBounce(i, 1); dockRefreshSoon(1500);
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        if (fldTile >= 0) { int d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1; fldScroll = std::clamp(fldScroll + d, 0, std::max(0, (int)fldWins.size() - FLD_ROWS)); dockKick(); }
+        return 0;
+    case WM_KEYDOWN:
+        if (fldTile >= 0) {
+            if (wp >= '1' && wp <= '9') { folderPick((int)wp - '1'); dockClosePopups(false); }
+            else if (wp >= VK_NUMPAD1 && wp <= VK_NUMPAD9) { folderPick((int)(wp - VK_NUMPAD1)); dockClosePopups(false); }
+            else if (wp == VK_ESCAPE) dockClosePopups(true);
+        } else if (ctxTile >= 0 && wp == VK_ESCAPE) dockClosePopups(true);
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && dockPopup()) dockClosePopups(false);  // clic fuera
+        return 0;
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_DISPLAYCHANGE: case WM_DPICHANGED: case WM_SETTINGCHANGE: dockKick(); return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+static void dockApply() {
+    dOn = cfg.hideTaskbar && dockHwnd;
+    if (!dockHwnd) return;
+    if (dOn) {
+        dCovered = dockCovered(); dShown = !dCovered; dHideS = {1.f, 0, dShown ? 0.f : 1.f};  // entra desde abajo
+        for (auto& it : dItems) it.vis = 0;
+        dFull = false;
+        ShowWindow(dockHwnd, SW_SHOWNOACTIVATE);
+        dockRefresh(); dockOnForeground(); dockKick();
+    } else {
+        dockClosePopups(false); hidePreview();
+        ShowWindow(dockHwnd, SW_HIDE);
+        if (dLocHook) { UnhookWinEvent(dLocHook); dLocHook = nullptr; dLocPid = 0; }
+    }
+}
+static void dockInit(HINSTANCE hi) {
+    WNDCLASSW wc{}; wc.lpfnWndProc = DockProc; wc.hInstance = hi; wc.lpszClassName = L"islita_dock"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
+    dockHwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, L"islita dock", WS_POPUP,
+                               0, 0, 10, 10, nullptr, nullptr, hi, nullptr);
+    WM_SHELLHOOK = RegisterWindowMessageW(L"SHELLHOOK");
+    RegisterShellHookWindow(dockHwnd);  // ventanas nuevas, cerradas y que piden atención, sin sondear
+    dockApply();
+}
 
 static void scheduleClock() {
     SYSTEMTIME st; GetLocalTime(&st);
@@ -4128,17 +4612,6 @@ static void click(int id) {
     else if (id > H_DAY && id < H_DAY + 32) selDay = id - H_DAY;
     else if (id == H_CBACK) selDay = 0;
     else if (id == H_COPEN || (id >= H_EVT && id < H_EVT + 100)) { openCalendarDay(calY, calM, selDay); return; }
-    else if (id == H_FOLD_BG) closeFolder(true);
-    else if (id >= H_FOLD && id < H_FOLD + FLD_ROWS) folderPick(fldScroll + id - H_FOLD);
-    else if (id == H_CTX_BG) ctxTile = -1;
-    else if (id >= H_CTX && id < H_CTX + 8) ctxRun(id - H_CTX);
-    else if (id >= H_APP && id < H_APP + (int)tiles.size()) {
-        // la isla se queda abierta hasta que se aparte el ratón
-        Tile t = tiles[id - H_APP];
-        if (t.run >= 0 && running[t.run].wins.size() >= 2) openFolder(id - H_APP);  // varias ventanas: se elige cuál
-        else if (t.run >= 0) activateRun(running[t.run]);
-        else { App& a = apps[t.pin]; ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL); SetTimer(gHwnd, T_TILES, 1500, nullptr); }
-    }
     else if (id == H_TM_MODE || id == H_TM_MODE + 1) { dismissAlert(); setPomo(id == H_TM_MODE + 1); }
     else if (id == H_TM_PLAY) {
         dismissAlert();
@@ -4170,8 +4643,6 @@ static void click(int id) {
     else if (id >= H_DEV && id < H_DEV + 20) { devSet(id - H_DEV); devOpen = false; }
     else if (id == H_TRAYBTN) { if (view == V_TRAY) view = lastTab; else { trayRefresh(); view = V_TRAY; } }
     else if (id >= H_TRAY && id < H_TRAY + 40) trayClick(id - H_TRAY, false);
-    else if (id == H_APP_ADD) startSearch();
-    else if (id >= H_APP_PAGE && id < H_APP_PAGE + 10) setAppPage(id - H_APP_PAGE);
     else if (id == H_SRCH) grabFocus();
     else if (id >= H_SRCH_RES && id < H_SRCH_RES + S_COLS * S_ROWS) { sLaunch(sScroll * S_COLS + id - H_SRCH_RES); setExpanded(false); return; }
     else if (id >= H_SRCH_PIN && id < H_SRCH_PIN + S_COLS * S_ROWS) { sSel = sScroll * S_COLS + id - H_SRCH_PIN; sTogglePin(sSel); }
@@ -4187,7 +4658,7 @@ static void click(int id) {
     else if (id == H_SET + 3) cfg.eq = !cfg.eq;
     else if (id == H_SET + 4) cfg.battery = !cfg.battery;
     else if (id == H_SET + 6) { cfg.discreetOn = !cfg.discreetOn; updateDiscreet(); }
-    else if (id == H_SET + 7) { cfg.hideTaskbar = !cfg.hideTaskbar; applyTaskbar(); }
+    else if (id == H_SET + 7) { cfg.hideTaskbar = !cfg.hideTaskbar; applyTaskbar(); dockApply(); }
     else if (id == H_SET + 5) cfg.alerts = !cfg.alerts;
     else if (id >= H_SEG_ALERT && id < H_SEG_ALERT + 3) cfg.alertMins = ALERTS[id - H_SEG_ALERT];
     else if (id >= H_SEG_SIZE && id < H_SEG_SIZE + 3) { cfg.size = id - H_SEG_SIZE; saveSettings(); applySize(); }
@@ -4384,11 +4855,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (trayWnd && FindWindowW(L"Shell_TrayWnd", nullptr) != trayWnd) trayTopmost();  // los iconos tienen que seguir llegando a islita
             checkFullscreen();
             if (visible) ensureTopmost();
+            dockCheckCover();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
         else if (wp == T_BTLIST) { KillTimer(h, T_BTLIST); PostMessageW(h, WM_APP_BTLIST, 0, 0); }
         else if (wp == T_PREVIEW) { KillTimer(h, T_PREVIEW); if (!animating) render(); }
         else if (wp == T_EVSHOW) { KillTimer(h, T_EVSHOW); if (!expanded) { collapsedTargets(); startAnim(); } }
-        else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();
         else if (wp == T_HOVER) { KillTimer(h, T_HOVER); if (hovered && !expanded) openFromPill(); }
@@ -4455,14 +4926,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LPARAM cl = MAKELPARAM(pt.x, pt.y);
         int id = hitAt(cl), d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
         if (view == V_SEARCH) { sScroll = std::clamp(sScroll + d, 0, sMaxScroll()); render(); return 0; }
-        if (fldTile >= 0) { fldScroll = std::clamp(fldScroll + d, 0, std::max(0, (int)fldWins.size() - FLD_ROWS)); render(); return 0; }
         if ((wifiOpen || btOpen) && ((id >= H_NET && id < H_NET + 12) || (id >= H_BT && id < H_BT + 12) || id == H_NET_MORE || id == H_BT_MORE || id == H_NET_DISC)) {
             listScroll = std::max(0, listScroll + d); render(); return 0;
-        }
-        if ((id >= H_APP && id < H_APP + 100) || id == H_APP_ADD || id == H_APPS_CARD || (id >= H_APP_PAGE && id < H_APP_PAGE + 10)) {
-            ULONGLONG n = nowMs(); static ULONGLONG lastFlip = 0;
-            if (n - lastFlip > 250) { lastFlip = n; setAppPage(appPage + d); }  // un salto por gesto en el panel táctil
-            render(); return 0;
         }
         if (id >= H_PICK && id < H_PICK + 3 && !pomo && tmState == 0) {
             int c = id - H_PICK; auto it = tweens.find(700 + c);
@@ -4475,13 +4940,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_KEYDOWN: {
-        if (fldTile >= 0) {
-            if (wp >= '1' && wp <= '9') folderPick((int)wp - '1');
-            else if (wp >= VK_NUMPAD1 && wp <= VK_NUMPAD9) folderPick((int)(wp - VK_NUMPAD1));
-            else if (wp == VK_ESCAPE) closeFolder(true);
-            else return 0;
-            render(); return 0;
-        }
         if (!sActive) break;
         int n = (int)sRes.size(); bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         sCaret = true; SetTimer(h, T_CARET, 530, nullptr);
@@ -4523,7 +4981,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE && fldTile >= 0) { closeFolder(false); if (!animating) render(); }
         // se hizo clic en otra ventana mientras se buscaba: se cierra
         if (LOWORD(wp) == WA_INACTIVE && sActive) { endSearch(false); if (!hovered) setExpanded(false); else render(); }
         break;
@@ -4564,15 +5021,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_RBUTTONUP:
         if (expanded) {
-            if (fldTile >= 0) { closeFolder(true); render(); return 0; }
             int id = hitAt(lp);
-            if (id >= H_APP && id < H_APP + (int)tiles.size()) {  // clic derecho en una app: su menú
-                ctxTile = id - H_APP; twSnap(20, 0);
-                for (auto& ht : hits) if (ht.id == id) { ctxAnchor = ht.r; break; }
-                hoverId = H_NONE; render();
-                return 0;
-            }
-            if (ctxTile >= 0) { ctxTile = -1; render(); return 0; }
             if (id >= H_TRAY && id < H_TRAY + 40) { trayClick(id - H_TRAY, true); setExpanded(false); return 0; }
         }
         if (!expanded) setExpanded(true, V_SET); else { view = V_SET; render(); } return 0;
@@ -4682,6 +5131,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     netInit(); volIndInit(); render();
     WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
     applyTaskbar();
+    dockInit(hi);
     RegisterPowerSettingNotification(gHwnd, &GUID_BATT, DEVICE_NOTIFY_WINDOW_HANDLE);
     RegisterPowerSettingNotification(gHwnd, &GUID_ACDC, DEVICE_NOTIFY_WINDOW_HANDLE);
     { SYSTEM_POWER_STATUS ps; if (GetSystemPowerStatus(&ps) && ps.ACLineStatus <= 1) lastAC = ps.ACLineStatus; }
@@ -4696,16 +5146,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     // bucle: en reposo duerme en GetMessage; animando, un fotograma por refresco de pantalla (DwmFlush)
     MSG m;
     for (;;) {
-        if (animating) {
+        if (animating || dAnim) {
             bool quit = false;
             while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
                 if (m.message == WM_QUIT) { quit = true; break; }
                 TranslateMessage(&m); DispatchMessageW(&m);
             }
             if (quit) break;
-            if (animating) {
+            if (animating || dAnim) {
                 LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
-                frame();
+                if (animating) frame();
+                if (dAnim) dockFrame();
                 // a ~60-75 fotogramas por segundo aunque la pantalla vaya a 120/144 Hz: igual de fluido y la mitad de CPU
                 int& flushes = gFlushes;
                 if (!flushes) {

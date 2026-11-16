@@ -83,6 +83,7 @@ static StatsInfo gStatsShared;
 static std::atomic<bool> gExpandedA{false}, gQuit{false}, gVisibleA{true}, gPollSoon{false};
 static HANDLE gWake;
 static HWND gHwnd, dockHwnd;  // la isla y el dock
+static void freeMarquee();
 static void dockAppsChanged(); static void dockRefreshSoon(UINT ms); static void dockOnForeground(); static void dockDropBitmaps(); static void dockKick();
 static bool dAnim = false;  // el dock está animándose
 static std::wstring gCfgDir, gCalFile;
@@ -1943,7 +1944,7 @@ static void createResources() {
 static void createTarget() {
     SafeRelease(cacheRT); cacheValid = false;
     for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; }
-    SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons();
+    freeMarquee(); SafeRelease(br); SafeRelease(dcrt); rt = nullptr; SafeRelease(artBmp); SafeRelease(artSBmp); artVerUI = ~0u; dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons();
     D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 0, 0);
     d2d->CreateDCRenderTarget(&p, &dcrt); rt = dcrt;
@@ -1968,7 +1969,7 @@ static void updateMonitor() {
     float s = dx / 96.f * SIZES[cfg.size];
     if (s != scale || !rt) {
         dpi = dx; scale = s;
-        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
+        if (!rt) createTarget(); else { rt->SetDpi(96 * scale, 96 * scale); freeMarquee(); dockDropBitmaps(); freeIcons(); freeSearchIcons(); freeRunIcons(); SafeRelease(cacheRT); cacheValid = false; for (auto& it : shelf) { SafeRelease(it.bmp); it.tried = false; } }
         ensureDib();
     }
 }
@@ -2493,6 +2494,171 @@ static void drawStatusRight(float right, float cy) {
 // lo que ocupa el contador del temporizador o del cronómetro (con o sin horas)
 static float counterW(bool hours) { return textWidth(hours ? L"0:00:00" : L"00:00", fTime); }
 
+// ---------------------------------------------------------------- letras de puntitos (estilo de la tipografía del Nothing Phone)
+// Matriz de 7 filas; cada letra con su ancho. Todo en mayúsculas y sin tildes (salvo la Ñ).
+struct DotGlyph { wchar_t c; const char* r[7]; };
+static const DotGlyph DOTS[] = {
+    {L'A', {".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+    {L'B', {"####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."}},
+    {L'C', {".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."}},
+    {L'D', {"####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."}},
+    {L'E', {"#####", "#....", "#....", "####.", "#....", "#....", "#####"}},
+    {L'F', {"#####", "#....", "#....", "####.", "#....", "#....", "#...."}},
+    {L'G', {".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"}},
+    {L'H', {"#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+    {L'I', {"###", ".#.", ".#.", ".#.", ".#.", ".#.", "###"}},
+    {L'J', {"..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."}},
+    {L'K', {"#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"}},
+    {L'L', {"#....", "#....", "#....", "#....", "#....", "#....", "#####"}},
+    {L'M', {"#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"}},
+    {L'N', {"#...#", "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#"}},
+    {L'Ñ', {".##.#", "#..#.", "#...#", "##..#", "#.#.#", "#..##", "#...#"}},
+    {L'O', {".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+    {L'P', {"####.", "#...#", "#...#", "####.", "#....", "#....", "#...."}},
+    {L'Q', {".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"}},
+    {L'R', {"####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"}},
+    {L'S', {".####", "#....", "#....", ".###.", "....#", "....#", "####."}},
+    {L'T', {"#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."}},
+    {L'U', {"#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+    {L'V', {"#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."}},
+    {L'W', {"#...#", "#...#", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#."}},
+    {L'X', {"#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"}},
+    {L'Y', {"#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."}},
+    {L'Z', {"#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"}},
+    {L'0', {".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."}},
+    {L'1', {".#.", "##.", ".#.", ".#.", ".#.", ".#.", "###"}},
+    {L'2', {".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"}},
+    {L'3', {"####.", "....#", "....#", ".###.", "....#", "....#", "####."}},
+    {L'4', {"...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."}},
+    {L'5', {"#####", "#....", "####.", "....#", "....#", "#...#", ".###."}},
+    {L'6', {".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."}},
+    {L'7', {"#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."}},
+    {L'8', {".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."}},
+    {L'9', {".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."}},
+    {L'.', {".", ".", ".", ".", ".", ".", "#"}},
+    {L',', {"..", "..", "..", "..", "..", ".#", "#."}},
+    {L':', {".", ".", "#", ".", ".", "#", "."}},
+    {L';', {"..", "..", ".#", "..", "..", ".#", "#."}},
+    {L'-', {"....", "....", "....", "####", "....", "....", "...."}},
+    {L'_', {"....", "....", "....", "....", "....", "....", "####"}},
+    {L'\'', {"#", "#", ".", ".", ".", ".", "."}},
+    {L'"', {"#.#", "#.#", "...", "...", "...", "...", "..."}},
+    {L'!', {"#", "#", "#", "#", "#", ".", "#"}},
+    {L'?', {".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."}},
+    {L'(', {"..#", ".#.", "#..", "#..", "#..", ".#.", "..#"}},
+    {L')', {"#..", ".#.", "..#", "..#", "..#", ".#.", "#.."}},
+    {L'[', {"##", "#.", "#.", "#.", "#.", "#.", "##"}},
+    {L']', {"##", ".#", ".#", ".#", ".#", ".#", "##"}},
+    {L'&', {".##..", "#..#.", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#"}},
+    {L'/', {"....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."}},
+    {L'+', {".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."}},
+    {L'#', {".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."}},
+    {L'*', {".....", "#.#.#", ".###.", "#####", ".###.", "#.#.#", "....."}},
+    {L'%', {"##..#", "##..#", "...#.", "..#..", ".#...", "#..##", "#..##"}},
+    {L'$', {"..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."}},
+    {L'@', {".###.", "#...#", "#.###", "#.#.#", "#.##.", "#....", ".###."}},
+    {L'=', {".....", ".....", "#####", ".....", "#####", ".....", "....."}},
+};
+static const DotGlyph* dotGlyph(wchar_t c) { for (auto& g : DOTS) if (g.c == c) return &g; return nullptr; }
+// mayúsculas y sin tildes (la Ñ se queda); comillas y guiones raros a los normales
+static std::wstring dotFold(const std::wstring& s) {
+    std::wstring out;
+    for (wchar_t c : s) {
+        if (c == L'ñ' || c == L'Ñ') { out += L'Ñ'; continue; }
+        if (c == L'‘' || c == L'’' || c == L'´' || c == L'`') { out += L'\''; continue; }
+        if (c == L'“' || c == L'”') { out += L'"'; continue; }
+        if (c == L'–' || c == L'—') { out += L'-'; continue; }
+        wchar_t b[8]; int n = FoldStringW(MAP_COMPOSITE, &c, 1, b, 8);
+        for (int i = 0; i < std::max(n, 1); i++) {
+            wchar_t d = n > 0 ? b[i] : c;
+            if (d >= 0x300 && d <= 0x36F) continue;  // tildes y diéresis sueltas
+            out += d;
+        }
+    }
+    if (!out.empty()) CharUpperBuffW(&out[0], (DWORD)out.size());
+    return out;
+}
+// Marquesina de la píldora con música: título - artista pasando en bucle, a saltos de una columna de puntitos.
+// Se dibuja una vez por canción en una imagen y luego solo se desplaza (va con el mismo ritmo del ecualizador).
+static ID2D1BitmapRenderTarget* mqRT = nullptr; static std::wstring mqKey; static float mqW = 0; static bool mqDots = true;
+static ULONGLONG mqMs = 0, mqLast = 0, mqChangedAt = 0;
+static const float DOT_P = 2.4f, DOT_R = 0.92f; static const int MQ_STEP_MS = 70;
+static void freeMarquee() { SafeRelease(mqRT); mqKey.clear(); }
+static bool buildMarquee(const std::wstring& title, const std::wstring& artist) {
+    std::wstring key = title + L"\x1f" + artist;
+    if (key == mqKey) return mqDots ? mqRT != nullptr : true;
+    SafeRelease(mqRT); mqKey = key; mqChangedAt = nowMs(); mqMs = 0;
+    struct Col { BYTE bits; float a; };
+    std::vector<Col> cols; int total = 0, missing = 0;
+    auto add = [&](const std::wstring& s, float a) {
+        for (wchar_t c : s) {
+            if (c == L' ') { for (int i = 0; i < 3; i++) cols.push_back({0, a}); continue; }
+            total++;
+            const DotGlyph* g = dotGlyph(c);
+            if (!g) { missing++; g = dotGlyph(L'?'); }
+            int w = (int)strlen(g->r[0]);
+            for (int x = 0; x < w; x++) { BYTE b = 0; for (int y = 0; y < 7; y++) if (g->r[y][x] == '#') b |= 1 << y; cols.push_back({b, a}); }
+            cols.push_back({0, a});
+        }
+    };
+    std::wstring t = dotFold(title), ar = dotFold(artist);
+    add(t, 1.f);
+    if (!ar.empty()) { add(L"  -  ", 0.45f); add(ar, 0.6f); }
+    for (int i = 0; i < 10; i++) cols.push_back({0, 0});  // hueco antes de volver a empezar
+    mqDots = total > 0 && missing * 10 <= total * 3;  // otros alfabetos (japonés, coreano...): letra normal
+    if (!mqDots) return true;
+    mqW = cols.size() * DOT_P;
+    D2D1_SIZE_F sz{mqW, 7 * DOT_P};
+    if (FAILED(dcrt->CreateCompatibleRenderTarget(&sz, nullptr, nullptr, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, &mqRT))) { mqRT = nullptr; return false; }
+    mqRT->BeginDraw();
+    D2D1_COLOR_F clear{0, 0, 0, 0}; mqRT->Clear(&clear);
+    for (size_t x = 0; x < cols.size(); x++)
+        for (int y = 0; y < 7; y++)
+            if (cols[x].bits & (1 << y)) {
+                D2D1_COLOR_F c{1, 1, 1, cols[x].a}; br->SetColor(&c);
+                D2D1_ELLIPSE e{{(x + 0.5f) * DOT_P, (y + 0.5f) * DOT_P}, DOT_R, DOT_R};
+                mqRT->FillEllipse(&e, br);
+            }
+    mqRT->EndDraw();
+    return true;
+}
+// x..x+w = hueco disponible; cy = centro vertical
+static void drawMarquee(float x, float cy, float w) {
+    if (w < 12) return;
+    ULONGLONG now = nowMs();
+    if (media.playing) mqMs += std::min<ULONGLONG>(now - mqLast, 200);
+    mqLast = now;
+    buildMarquee(media.title, media.artist);
+    if (!mqDots || !mqRT) {
+        std::wstring s = media.artist.empty() ? media.title : media.title + L" - " + media.artist;
+        col(1, 1, 1, 0.55f); text(s, fSmall, x, cy - 9, w, 18); return;
+    }
+    ID2D1Bitmap* b = nullptr; mqRT->GetBitmap(&b);
+    if (!b) return;
+    // animación al cambiar de canción: los puntitos se van encendiendo de izquierda a derecha
+    float rev = easeOut(clampf((now - mqChangedAt) / 650.f, 0, 1));
+    float off = fmodf((float)(mqMs / MQ_STEP_MS) * DOT_P, mqW);
+    float y = cy - 3.5f * DOT_P, vis = w * rev;
+    // bordes que se difuminan: el hueco se pinta en franjas con opacidad creciente
+    const int NF = 6; const float F = 16;
+    auto strip = [&](float s0, float s1, float op) {
+        if (s1 <= s0 || op <= 0.01f) return;
+        D2D1_RECT_F clip{x + s0, y - 1, x + s1, y + 7 * DOT_P + 1};
+        rt->PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        for (float bx = x - off; bx < x + s1; bx += mqW) {
+            if (bx + mqW <= x + s0) continue;
+            D2D1_RECT_F d{bx, y, bx + mqW, y + 7 * DOT_P};
+            rt->DrawBitmap(b, &d, op * gA, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, nullptr);
+        }
+        rt->PopAxisAlignedClip();
+    };
+    float f = std::min(F, w / 4);
+    for (int i = 0; i < NF; i++) strip(f * i / NF, f * (i + 1) / NF, (i + 0.5f) / NF);
+    strip(f, std::min(vis, w - f), 1.f);
+    for (int i = 0; i < NF; i++) { float s0 = w - f + f * i / NF; strip(s0, std::min(vis, s0 + f / NF), 1 - (i + 0.5f) / NF); }
+    b->Release();
+}
+
 static void drawCollapsed(float px, float py, float pw, int mode) {
     SYSTEMTIME st; GetLocalTime(&st);
     std::wstring tm = hhmm(st.wHour * 60 + st.wMinute);
@@ -2557,7 +2723,7 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         drawStatusLeft(px + 96, cy);
         float rs = bx - 12, tx = px + 96 + statusLeftW() + 6, tr = rs - statusRightW() - 12;
         drawStatusRight(rs, cy);
-        col(1, 1, 1, 0.55f); text(media.title, fSmall, tx, cy - 9, std::max(0.f, tr - tx), 18);
+        drawMarquee(tx, cy, std::max(0.f, tr - tx));
         for (int i = 0; i < 4; i++) {
             float hgt = 3.5f;
             if (media.playing) {
@@ -3663,12 +3829,14 @@ static void startAnim() {
     animating = true; QueryPerformanceCounter(&lastTick); setEco(false);
 }
 static bool eqActive() { return visible && cfg.eq && !expanded && media.playing && pillMode() == PM_MUSIC; }
+// la marquesina solo se mueve con la píldora a la vista (no en la rayita) y con música sonando
+static bool marqueeActive() { return visible && !expanded && media.playing && pillMode() == PM_MUSIC && sh.t >= CH - 1 && !media.title.empty(); }
 static int wantTick() {
     if (alertOn) return 33;
     if (!visible) return tmState == 1 ? 250 : 0;
     if (expanded && view == 1 && swRun) return 50;
     if (expanded && view == 1 && tmState == 1) return 100;
-    if (eqActive()) return 70;
+    if (eqActive() || marqueeActive()) return MQ_STEP_MS;
     if (tmState == 1 || swRun) return 250;
     return 0;
 }
@@ -3856,7 +4024,7 @@ static void collapsedTargets() {
     float left = 78 + statusLeftW() + 12;
     if (mode == PM_TIMER) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(tmRemaining() >= 3600000) + 38);
     else if (mode == PM_SW) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(swElapsed() >= 3600000) + 36);
-    else if (mode == PM_MUSIC) w = 96 + statusLeftW() + 6 + 130 + 12 + statusRightW() + 12 + 33;
+    else if (mode == PM_MUSIC) w = 96 + statusLeftW() + 6 + 170 + 12 + statusRightW() + 12 + 33;
     if (hovered) { w += 10; h += 3; }
     sw.t = w; sh.t = h; sr.t = h / 2;
 }
@@ -4015,7 +4183,7 @@ static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWO
 enum { DT_REFRESH = 1, DT_COVER, DT_HIDE, DT_PREVIEW };
 enum { D_WIN = 3000, D_ITEM = 3001 };  // zonas de clic del dock: D_ITEM + índice
 static const UINT WM_APP_DOCKAPPS = WM_APP + 40;
-static const float D_S = 48, D_GAP = 7, D_PAD = 9, D_SEPW = 13, D_BM = 8, D_MAG = 1.6f, D_LABEL = 40, D_R = 20;
+static const float D_S = 38, D_GAP = 6, D_PAD = 5, D_SEPW = 11, D_BM = 6, D_MAG = 1.5f, D_LABEL = 34, D_R = 16;
 static const float D_OP[3] = {0.82f, 0.58f, 0.40f};  // opacidad del fondo según Aspecto > Fondo (sólido, medio, cristal)
 struct DockItem {
     std::wstring key, name; ID2D1Bitmap* bmp = nullptr;  // icono con referencia propia: así se puede animar la salida
@@ -4029,6 +4197,7 @@ struct DockItem {
 static std::vector<DockItem> dItems;
 static HDC dDC; static HBITMAP dDib, dOldBmp; static int dDibW = 0, dDibH = 0;
 static std::vector<Hit> dHits; static int dHover = H_NONE, dPress = H_NONE; static std::map<int, Tween> dTweens;
+static bool dStartOpen = false;  // el menú Inicio de Windows está abierto
 static bool dOn = false, dShown = true, dCovered = false, dFull = false, dMouseIn = false, dPendingRefresh = false;
 static int hitAt(LPARAM lp);
 static Spring dHideS{0, 0, 0};
@@ -4114,9 +4283,10 @@ static void dockAppsChanged() {
 }
 
 // --- tapado, pantalla completa y visibilidad
+static bool isStartMenu(HWND h);
 static bool dockCovered() {
     HWND fg = GetForegroundWindow();
-    if (!fg || fg == dockHwnd || fg == gHwnd || fg == prevWnd) return dCovered;  // sin cambios mientras se usa islita
+    if (!fg || fg == dockHwnd || fg == gHwnd || fg == prevWnd || isStartMenu(fg)) return dCovered;  // sin cambios mientras se usa islita o Inicio
     if (fg == GetDesktopWindow() || fg == GetShellWindow() || IsIconic(fg) || !IsWindowVisible(fg)) return false;
     wchar_t cls[64]; GetClassNameW(fg, cls, 64);
     if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || isTray(fg)) return false;
@@ -4129,7 +4299,7 @@ static bool dockCovered() {
     return r.left < cx + half && r.right > cx - half && r.bottom > top && r.top < mon.bottom;
 }
 static void dockUpdateShown() {
-    bool want = !dCovered || dMouseIn || dockPopup() || prevMouseIn;
+    bool want = !dCovered || dMouseIn || dockPopup() || prevMouseIn || dStartOpen;
     if (want == dShown) return;
     dShown = want;
     if (want) SetWindowPos(dockHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -4160,10 +4330,19 @@ static void dockWatch(HWND fg) {
     if (pid && pid != GetCurrentProcessId())
         dLocHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, dockLocEvent, pid, 0, WINEVENT_OUTOFCONTEXT);
 }
+static bool isStartMenu(HWND h) {
+    wchar_t cls[64]; if (!h || !GetClassNameW(h, cls, 64) || wcscmp(cls, L"Windows.UI.Core.CoreWindow")) return false;
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    std::wstring e = exeOfPid(pid);
+    return endsWithI(e, L"\\StartMenuExperienceHost.exe") || endsWithI(e, L"\\SearchHost.exe");
+}
 static void dockOnForeground() {
     if (!dOn || !dockHwnd) return;
     HWND fg = GetForegroundWindow();
     if (!fg || fg == dockHwnd || fg == gHwnd || fg == prevWnd) return;
+    bool st = isStartMenu(fg);
+    if (st != dStartOpen) { dStartOpen = st; dockUpdateShown(); }
+    if (st) { dockKick(); return; }  // el menú Inicio no cuenta como app activa
     fgAtOpen = fg;
     dockWatch(fg);
     bool known = false;
@@ -4197,12 +4376,11 @@ static float dockBounce(DockItem& it, float S) {
     return -hgt * 4 * p * (1 - p);
 }
 static void dockIcon(DockItem& it, float x, float y, float s, float op) {
-    if (it.kind == 1) {  // botón de Inicio: cristal con el logo de Windows
-        float r = s * 0.24f;
-        col(1, 1, 1, (0.13f + 0.08f * it.hov) * op); fillRR(x, y, s, s, r);
-        col(1, 1, 1, 0.16f * op); D2D1_ROUNDED_RECT rr{{x + 0.5f, y + 0.5f, x + s - 0.5f, y + s - 0.5f}, r, r}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
-        float ga = gA; gA = ga * op;
-        winLogo(x + s / 2, y + s / 2, s * 0.44f, mix(WINBLUE, {1, 1, 1, 1}, 0.2f * it.hov));
+    if (it.kind == 1) {  // botón de Inicio: solo el logo, en blanco; fondo suave al pasar el ratón
+        float r = s * 0.26f;
+        if (it.hov > 0.01f || it.prs > 0.01f) { col(1, 1, 1, (0.1f * it.hov + 0.06f * it.prs) * op); fillRR(x, y, s, s, r); }
+        float ga = gA; gA = ga * op * (1 - 0.3f * it.prs);
+        winLogo(x + s / 2, y + s / 2, s * 0.42f, {1, 1, 1, 0.82f + 0.18f * it.hov});
         gA = ga;
         return;
     }
@@ -4225,7 +4403,7 @@ static void dockRenderIn() {
     };
     float S = D_S, bw = baseW(S);
     if (bw > monWd - 40) { S = std::max(26.f, S * (monWd - 40) / bw); bw = baseW(S); }
-    float barH = S + 2 * D_PAD + 4;
+    float barH = S + 2 * D_PAD + 3;
     float popH = ctxTile >= 0 ? ctxBuild() : fldTile >= 0 ? folderHeight() : 0;
     float topSpace = std::max(S * (D_MAG - 1) + D_LABEL, popH + 24);
     dW = std::min(monWd, bw + 360); dH = D_BM + barH + topSpace + 8;
@@ -4271,11 +4449,9 @@ static void dockRenderIn() {
     if (dHideS.x < 1.05f) {
         // sombra suave y cristal
         float r = std::min(D_R, barH / 2);
-        for (int i = 4; i >= 1; i--) { float g = i * 3.f; col(0, 0, 0, 0.045f); fillRR(barL - g, barTop - g + 4, total + 2 * g, barH + 2 * g, r + g); }
+        for (int i = 2; i >= 1; i--) { float g = i * 3.f; col(0, 0, 0, 0.05f); fillRR(barL - g, barTop - g + 3, total + 2 * g, barH + 2 * g, r + g); }
         col(0.07f, 0.07f, 0.08f, D_OP[cfg.opacity % 3]); fillRR(barL, barTop, total, barH, r);
-        col(1, 1, 1, 0.045f); fillRR(barL + 1, barTop + 1, total - 2, barH * 0.48f, r - 1);  // brillo de arriba
-        col(0, 0, 0, 0.35f); { D2D1_ROUNDED_RECT o{{barL - 0.5f, barTop - 0.5f, barR + 0.5f, barTop + barH + 0.5f}, r + 0.5f, r + 0.5f}; rt->DrawRoundedRectangle(&o, br, 1, nullptr); }
-        col(1, 1, 1, 0.13f); { D2D1_ROUNDED_RECT in{{barL + 0.5f, barTop + 0.5f, barR - 0.5f, barTop + barH - 0.5f}, r - 0.5f, r - 0.5f}; rt->DrawRoundedRectangle(&in, br, 1, nullptr); }
+        col(1, 1, 1, 0.08f); { D2D1_ROUNDED_RECT in{{barL + 0.5f, barTop + 0.5f, barR - 0.5f, barTop + barH - 0.5f}, r - 0.5f, r - 0.5f}; rt->DrawRoundedRectangle(&in, br, 1, nullptr); }
 
         // iconos (alineados por abajo: al agrandarse crecen hacia arriba, como en el Mac)
         float x = barL + D_PAD; int hoverIdx = -1; dLabelTop = barTop - 30;
@@ -4285,21 +4461,20 @@ static void dockRenderIn() {
             float w = ww[i];
             it.x = x; it.w = w; it.cx = x + w / 2;
             if (it.kind == 2) {
-                col(1, 1, 1, 0.2f * it.vis); fillRR(x + w / 2 - 0.6f, barTop + D_PAD + 5, 1.2f, S - 10, 0.6f);
+                col(1, 1, 1, 0.12f * it.vis); fillRR(x + w / 2 - 0.5f, barTop + D_PAD + 8, 1.f, S - 16, 0.5f);
             } else if (it.vis > 0.01f) {
                 float s = S * sc[i] * (0.35f + 0.65f * it.vis) * (1 - 0.06f * it.prs);
                 float ix = x + (w - s) / 2, iy = iconBase - s + dockBounce(it, S);
                 it.top = iy;
                 dockIcon(it, ix, iy, s, it.vis);
-                // puntito de abierta (del color de acento si es la app activa); uno por ventana, hasta 3
+                // puntito de abierta (más claro si es la app activa); uno por ventana, hasta 3
                 if (it.dot > 0.01f && it.tile >= 0 && tiles[it.tile].run >= 0) {
                     const RunApp& ra = running[tiles[it.tile].run];
                     bool act = std::find(ra.wins.begin(), ra.wins.end(), fgAtOpen) != ra.wins.end();
-                    float dy = barTop + barH - 5.5f, dcx = x + w / 2;
+                    float dy = barTop + barH - 3.2f, dcx = x + w / 2;
                     int nd = std::min((int)ra.wins.size(), 3);
-                    if (act) colC(ACC(), it.dot); else col(1, 1, 1, 0.75f * it.dot);
-                    if (nd <= 1) { float dw = (act ? 10.f : 4.f) * it.dot; fillRR(dcx - dw / 2, dy - 2, dw, 4, 2); }
-                    else { float gp = 6.f; for (int k = 0; k < nd; k++) circle(dcx + (k - (nd - 1) / 2.f) * gp, dy, 1.9f * it.dot); }
+                    col(1, 1, 1, (act ? 0.95f : 0.4f) * it.dot);
+                    float gp = 4.6f; for (int k = 0; k < nd; k++) circle(dcx + (k - (nd - 1) / 2.f) * gp, dy, 1.4f * it.dot);
                 }
                 if (!it.leaving) addHit(x - D_GAP / 2, std::min(iy, iconBase - S) - 4, w + D_GAP, dH - (std::min(iy, iconBase - S) - 4), it.kind == 1 ? D_WIN : D_ITEM + (int)i);
                 if (it.hov > 0.01f && !it.leaving && (hoverIdx < 0 || it.hov > dItems[hoverIdx].hov)) hoverIdx = (int)i;
@@ -4310,12 +4485,11 @@ static void dockRenderIn() {
         if (hoverIdx >= 0 && !dockPopup()) {
             auto& it = dItems[hoverIdx];
             float a = easeOut(it.hov);
-            float tw_ = std::min(260.f, textWidth(it.name, fSmall) + 22), th = 26;
-            float lx = clampf(it.cx - tw_ / 2, 4, dW - 4 - tw_), ly = it.top - 12 - th + (1 - a) * 5;
+            float tw_ = std::min(240.f, textWidth(it.name, fApp) + 16), th = 20;
+            float lx = clampf(it.cx - tw_ / 2, 4, dW - 4 - tw_), ly = it.top - 10 - th + (1 - a) * 4;
             dLabelTop = ly;
-            col(0.11f, 0.11f, 0.12f, 0.92f * a); fillRR(lx, ly, tw_, th, 9);
-            col(1, 1, 1, 0.12f * a); { D2D1_ROUNDED_RECT rr{{lx + 0.5f, ly + 0.5f, lx + tw_ - 0.5f, ly + th - 0.5f}, 9, 9}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr); }
-            col(1, 1, 1, 0.95f * a); text(it.name, fSmall, lx + 11, ly, tw_ - 22, th, DWRITE_TEXT_ALIGNMENT_CENTER);
+            col(0.08f, 0.08f, 0.09f, 0.85f * a); fillRR(lx, ly, tw_, th, th / 2);
+            col(1, 1, 1, 0.92f * a); text(it.name, fApp, lx + 8, ly, tw_ - 16, th, DWRITE_TEXT_ALIGNMENT_CENTER);
         }
         // menú o carpeta: van por encima de todo (y sus zonas de clic primero)
         if (dockPopup()) {
@@ -4916,7 +5090,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (alertOn && n - alertAt > (alertPomo ? 6000u : 30000u)) dismissAlert();
             // solo redibujar si cambia lo que se ve (el segundo del contador)
             static ULONGLONG lastShown = ~0ull;
-            bool cont = alertOn || eqActive() || (expanded && view == 1 && (swRun || tmState == 1));
+            bool cont = alertOn || eqActive() || marqueeActive() || (expanded && view == 1 && (swRun || tmState == 1));
             ULONGLONG shown = (tmRemaining() + 999) / 1000 * 100003 + swElapsed() / 1000 + (expanded ? 7 : 0);
             if (!animating && (cont || shown != lastShown)) { lastShown = shown; render(); }
         } else if (wp == T_CLOCK) { scheduleClock(); if (!expanded) collapsedTargets(); if (!animating) render(); }

@@ -14,17 +14,17 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 
 **En reposo**, la píldora muestra la hora, el wifi y el volumen (como en la barra de tareas), la fecha y la batería. Cambia sola según lo que pase:
 
-- Si suena música: carátula, título y un ecualizador con el color de la carátula, sin quitar la hora, el wifi, el volumen, la fecha ni la batería.
+- Si suena música: carátula, ecualizador con el color de la carátula y el título seguido del artista pasando en bucle con letras de puntitos (como la tipografía del Nothing Phone), sin quitar la hora, el wifi, el volumen, la fecha ni la batería. Al cambiar de canción los puntitos se van encendiendo; en pausa se para. Solo se mueve con la píldora a la vista y va al mismo ritmo que el ecualizador, así que no gasta más.
 - Si tienes un evento pronto: "Clase en 20 min".
 - Con el temporizador en marcha: la cuenta atrás con un anillo de progreso, también junto al resto de la información.
 - Al enchufar el cargador: un rayo animado y la batería llenándose hasta el porcentaje real. Mientras está enchufado sale un rayito al lado de la batería.
 - Si la ventana que estás usando queda debajo de la isla (por ejemplo, maximizada), se encoge a una rayita fina para no tapar nada. Al pasar el ratón por arriba vuelve.
 - Mantén **Ctrl** con el ratón encima para que casi desaparezca y deje pasar los clics a lo que hay debajo.
 
-**El dock**: abajo en el centro hay un dock de cristal translúcido, como el del Mac, que sustituye a la barra de tareas de Windows:
+**El dock**: abajo en el centro hay un dock fino de cristal translúcido, minimalista, como el del Mac, que sustituye a la barra de tareas de Windows:
 
-- El botón de Inicio abre el menú Inicio de Windows (clic derecho: el buscador de apps de la isla).
-- Primero tus apps fijadas y, tras una rayita, las demás que tengas abiertas. Las abiertas llevan un puntito debajo (uno por ventana, hasta tres; del color de acento la que estás usando).
+- El botón de Inicio abre el menú Inicio de Windows, que sale justo encima del dock; con Inicio abierto el dock se queda a la vista (clic derecho: el buscador de apps de la isla).
+- Primero tus apps fijadas y, tras una rayita, las demás que tengas abiertas. Las abiertas llevan un puntito debajo (uno por ventana, hasta tres; más claro en la que estás usando).
 - Al pasar el ratón los iconos se agrandan como una lupa y sale el nombre encima; al rato, sus ventanas en miniatura y en directo. Da tiempo a subir el ratón hasta ellas y pulsar la que quieras.
 - Clic en una abierta: va a su ventana (si ya estaba delante, se minimiza). Si tiene varias se abre una carpeta con sus ventanas numeradas: clic o el número en el teclado (Esc la cierra). Clic en una fijada cerrada: se abre y el icono va dando saltos hasta que sale su ventana. Botón de la rueda: otra ventana nueva.
 - Clic derecho: las miniaturas y un menú para abrir otra ventana, fijar o quitar del dock y cerrar.

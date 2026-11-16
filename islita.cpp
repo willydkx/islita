@@ -2936,6 +2936,72 @@ static void ctxRun(int item) {
     }
 }
 
+// ---------------------------------------------------------------- vista previa de una ventana (miniatura en directo de DWM, como la barra de tareas)
+// Va en una ventanita aparte debajo de la isla: DWM la pinta él solo, sin gastar CPU de islita.
+static HWND prevWnd = nullptr, prevSrc = nullptr; static HTHUMBNAIL prevThumb = nullptr; static bool prevMini = false;
+static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_NCHITTEST: return HTTRANSPARENT;
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); RECT r; GetClientRect(h, &r);
+        HBRUSH b = CreateSolidBrush(RGB(38, 38, 41)); FillRect(dc, &r, b); DeleteObject(b);
+        if (prevMini && prevSrc) {  // minimizada: Windows no la dibuja, así que va su icono
+            HICON ic = nullptr; DWORD_PTR res = 0;
+            if (SendMessageTimeoutW(prevSrc, WM_GETICON, ICON_BIG, 0, SMTO_ABORTIFHUNG, 100, &res)) ic = (HICON)res;
+            if (!ic) ic = (HICON)GetClassLongPtrW(prevSrc, GCLP_HICON);
+            if (!ic) ic = LoadIconW(nullptr, IDI_APPLICATION);
+            int sz = (int)(40 * scale);
+            DrawIconEx(dc, (r.right - sz) / 2, r.bottom / 2 - sz + (int)(4 * scale), ic, sz, sz, 0, nullptr, DI_NORMAL);
+            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(150, 150, 156));
+            HFONT f = CreateFontW(-(int)(12 * scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HGDIOBJ o = SelectObject(dc, f);
+            RECT tr{0, r.bottom / 2 + (int)(12 * scale), r.right, r.bottom};
+            DrawTextW(dc, L"Minimizada", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+            SelectObject(dc, o); DeleteObject(f);
+        }
+        EndPaint(h, &ps); return 0;
+    }
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static void hidePreview() {
+    if (prevThumb) { DwmUnregisterThumbnail(prevThumb); prevThumb = nullptr; }
+    prevSrc = nullptr;
+    if (prevWnd) ShowWindow(prevWnd, SW_HIDE);
+}
+// rowCx = centro de la fila en la ventana (DIP); bottom = borde de abajo del panel en pantalla
+static void showPreview(HWND src, int rowCx, int bottom) {
+    if (src == prevSrc && prevWnd && IsWindowVisible(prevWnd)) return;
+    hidePreview();
+    if (!IsWindow(src)) return;
+    if (!prevWnd) {
+        WNDCLASSEXW wc{sizeof wc}; wc.lpfnWndProc = prevProc; wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"islita_prev"; wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
+        RegisterClassExW(&wc);
+        prevWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
+        if (!prevWnd) return;
+        DWORD cp = 2; DwmSetWindowAttribute(prevWnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &cp, sizeof cp);  // esquinas redondeadas
+    }
+    prevSrc = src; prevMini = IsIconic(src) != 0;
+    int pad = (int)(8 * scale), cw = (int)(200 * scale), ch = (int)(120 * scale);
+    if (!prevMini && SUCCEEDED(DwmRegisterThumbnail(prevWnd, src, &prevThumb))) {
+        SIZE ss{}; DwmQueryThumbnailSourceSize(prevThumb, &ss);
+        if (ss.cx <= 0 || ss.cy <= 0) { ss.cx = 16; ss.cy = 10; }
+        float k = std::min(1.f, std::min(320 * scale / ss.cx, 200 * scale / ss.cy));
+        int tw_ = std::max(1, (int)(ss.cx * k)), th = std::max(1, (int)(ss.cy * k));
+        cw = tw_ + 2 * pad; ch = th + 2 * pad;
+        DWM_THUMBNAIL_PROPERTIES tp{};
+        tp.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+        tp.rcDestination = {pad, pad, pad + tw_, pad + th}; tp.fVisible = TRUE; tp.opacity = 255; tp.fSourceClientAreaOnly = FALSE;
+        DwmUpdateThumbnailProperties(prevThumb, &tp);
+    } else { prevThumb = nullptr; prevMini = true; }
+    int x = std::clamp(rowCx - cw / 2, (int)mon.left + 8, (int)mon.right - 8 - cw);
+    SetWindowPos(prevWnd, HWND_TOPMOST, x, bottom + (int)(8 * scale), cw, ch, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(prevWnd, nullptr, TRUE);
+}
+
 // ---------------------------------------------------------------- carpeta: las ventanas de una app, numeradas (como las carpetas del iPhone)
 static int fldTile = -1, fldScroll = 0; static D2D1_RECT_F fldAnchor{}; static std::vector<HWND> fldWins; static HWND fldPrevFg = nullptr;
 static const int FLD_ROWS = 6;
@@ -2951,7 +3017,7 @@ static void openFolder(int tile) {
 }
 static void closeFolder(bool restoreFocus) {
     if (fldTile < 0) return;
-    fldTile = -1; fldWins.clear();
+    fldTile = -1; fldWins.clear(); hidePreview();
     if (restoreFocus && GetForegroundWindow() == gHwnd && fldPrevFg && IsWindow(fldPrevFg)) SetForegroundWindow(fldPrevFg);
     fldPrevFg = nullptr;
 }
@@ -3017,6 +3083,18 @@ static void drawFolder(float ox, float oy) {
     rt->SetTransform(&base);
     gA = ga;
     addHit(ox, oy, EW, EH, H_FOLD_BG);  // un clic fuera la cierra
+}
+// tras cada dibujado: vista previa de la fila de la carpeta que tiene el ratón (wx, wy, wh = ventana de la isla en pantalla)
+static void updatePreview(int wx, int wy, int wh, bool canShow) {
+    HWND want = nullptr; float rcx = 0;
+    if (canShow && expanded && visible && view == 0 && fldTile >= 0 && hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS
+        && sw.settled() && sh.settled() && tw(24, 1.f, 22) > 0.98f) {
+        int i = fldScroll + hoverId - H_FOLD;
+        if (i < (int)fldWins.size())
+            for (auto& ht : hits) if (ht.id == hoverId) { want = fldWins[i]; rcx = (ht.r.left + ht.r.right) / 2; break; }
+    }
+    if (want) showPreview(want, wx + (int)(rcx * scale), wy + wh - (int)(M * scale));
+    else if (prevSrc) hidePreview();
 }
 
 // ---------------------------------------------------------------- pestaña Herramientas
@@ -3737,6 +3815,7 @@ static void render() {
     UpdateLayeredWindow(gHwnd, nullptr, &dst, &sz, memDC, &src, 0, &bf, ULW_ALPHA);
     if (!animating && (!springsSettled() || tweensActive())) startAnim();
     updateTick();
+    updatePreview(dst.x, dst.y, H, !peeking);
 }
 
 // ---------------------------------------------------------------- animación (al ritmo de la pantalla)

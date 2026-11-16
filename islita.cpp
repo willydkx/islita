@@ -56,7 +56,7 @@ static const float CW_IDLE = 276, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
-enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES, T_BTLIST };
+enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES, T_BTLIST, T_PREVIEW };
 enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY, WM_APP_BTLIST, WM_APP_RADIO };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK, H_NET_BTN, H_BT_BTN, H_NET_MORE, H_BT_MORE, H_NET_DISC, H_NET_TOG, H_BT_TOG,
@@ -2936,9 +2936,11 @@ static void ctxRun(int item) {
     }
 }
 
-// ---------------------------------------------------------------- vista previa de una ventana (miniatura en directo de DWM, como la barra de tareas)
-// Va en una ventanita aparte debajo de la isla: DWM la pinta él solo, sin gastar CPU de islita.
-static HWND prevWnd = nullptr, prevSrc = nullptr; static HTHUMBNAIL prevThumb = nullptr; static bool prevMini = false;
+// ---------------------------------------------------------------- vista previa de ventanas (miniaturas en directo de DWM, como la barra de tareas)
+// Va en una ventanita aparte debajo de la isla: DWM las pinta él solo, sin gastar CPU de islita.
+static HWND prevWnd = nullptr;
+static std::vector<HWND> prevSrcs; static std::vector<HTHUMBNAIL> prevThumbs; static std::vector<RECT> prevSlots; static std::vector<std::wstring> prevTitles;
+static std::vector<HWND> prevPending; static ULONGLONG prevPendingAt = 0;
 static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
@@ -2947,35 +2949,45 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); RECT r; GetClientRect(h, &r);
         HBRUSH b = CreateSolidBrush(RGB(38, 38, 41)); FillRect(dc, &r, b); DeleteObject(b);
-        if (prevMini && prevSrc) {  // minimizada: Windows no la dibuja, así que va su icono
-            HICON ic = nullptr; DWORD_PTR res = 0;
-            if (SendMessageTimeoutW(prevSrc, WM_GETICON, ICON_BIG, 0, SMTO_ABORTIFHUNG, 100, &res)) ic = (HICON)res;
-            if (!ic) ic = (HICON)GetClassLongPtrW(prevSrc, GCLP_HICON);
-            if (!ic) ic = LoadIconW(nullptr, IDI_APPLICATION);
-            int sz = (int)(40 * scale);
-            DrawIconEx(dc, (r.right - sz) / 2, r.bottom / 2 - sz + (int)(4 * scale), ic, sz, sz, 0, nullptr, DI_NORMAL);
-            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(150, 150, 156));
-            HFONT f = CreateFontW(-(int)(12 * scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-            HGDIOBJ o = SelectObject(dc, f);
-            RECT tr{0, r.bottom / 2 + (int)(12 * scale), r.right, r.bottom};
-            DrawTextW(dc, L"Minimizada", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
-            SelectObject(dc, o); DeleteObject(f);
+        SetBkMode(dc, TRANSPARENT);
+        HFONT f = CreateFontW(-(int)(12 * scale), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ o = SelectObject(dc, f);
+        for (size_t i = 0; i < prevSrcs.size() && i < prevSlots.size(); i++) {
+            const RECT& sl = prevSlots[i];
+            if (i < prevTitles.size() && !prevTitles[i].empty()) {  // título encima de cada miniatura
+                SetTextColor(dc, RGB(225, 225, 230));
+                RECT tr{sl.left, sl.top - (int)(20 * scale), sl.right, sl.top - (int)(4 * scale)};
+                DrawTextW(dc, prevTitles[i].c_str(), -1, &tr, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+            if (!prevThumbs[i]) {  // minimizada: Windows no la dibuja, así que va su icono
+                HWND src = prevSrcs[i]; HICON ic = nullptr; DWORD_PTR res = 0;
+                if (SendMessageTimeoutW(src, WM_GETICON, ICON_BIG, 0, SMTO_ABORTIFHUNG, 100, &res)) ic = (HICON)res;
+                if (!ic) ic = (HICON)GetClassLongPtrW(src, GCLP_HICON);
+                if (!ic) ic = LoadIconW(nullptr, IDI_APPLICATION);
+                HBRUSH sb = CreateSolidBrush(RGB(48, 48, 52)); FillRect(dc, &sl, sb); DeleteObject(sb);
+                int sz = (int)(36 * scale), cx = (sl.left + sl.right) / 2, cy = (sl.top + sl.bottom) / 2;
+                DrawIconEx(dc, cx - sz / 2, cy - sz + (int)(4 * scale), ic, sz, sz, 0, nullptr, DI_NORMAL);
+                SetTextColor(dc, RGB(150, 150, 156));
+                RECT tr{sl.left, cy + (int)(10 * scale), sl.right, sl.bottom};
+                DrawTextW(dc, L"Minimizada", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+            }
         }
+        SelectObject(dc, o); DeleteObject(f);
         EndPaint(h, &ps); return 0;
     }
     }
     return DefWindowProcW(h, m, wp, lp);
 }
 static void hidePreview() {
-    if (prevThumb) { DwmUnregisterThumbnail(prevThumb); prevThumb = nullptr; }
-    prevSrc = nullptr;
+    for (HTHUMBNAIL t : prevThumbs) if (t) DwmUnregisterThumbnail(t);
+    prevThumbs.clear(); prevSrcs.clear(); prevSlots.clear(); prevTitles.clear();
     if (prevWnd) ShowWindow(prevWnd, SW_HIDE);
 }
-// rowCx = centro de la fila en la ventana (DIP); bottom = borde de abajo del panel en pantalla
-static void showPreview(HWND src, int rowCx, int bottom) {
-    if (src == prevSrc && prevWnd && IsWindowVisible(prevWnd)) return;
+// cx = centro horizontal en pantalla; bottom = borde de abajo del panel en pantalla; titles vacío = sin títulos
+static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::wstring>& titles, int cx, int bottom) {
+    if (srcs == prevSrcs && prevWnd && IsWindowVisible(prevWnd)) return;
     hidePreview();
-    if (!IsWindow(src)) return;
+    if (srcs.empty()) return;
     if (!prevWnd) {
         WNDCLASSEXW wc{sizeof wc}; wc.lpfnWndProc = prevProc; wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"islita_prev"; wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
@@ -2984,21 +2996,43 @@ static void showPreview(HWND src, int rowCx, int bottom) {
         if (!prevWnd) return;
         DWORD cp = 2; DwmSetWindowAttribute(prevWnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &cp, sizeof cp);  // esquinas redondeadas
     }
-    prevSrc = src; prevMini = IsIconic(src) != 0;
-    int pad = (int)(8 * scale), cw = (int)(200 * scale), ch = (int)(120 * scale);
-    if (!prevMini && SUCCEEDED(DwmRegisterThumbnail(prevWnd, src, &prevThumb))) {
-        SIZE ss{}; DwmQueryThumbnailSourceSize(prevThumb, &ss);
-        if (ss.cx <= 0 || ss.cy <= 0) { ss.cx = 16; ss.cy = 10; }
-        float k = std::min(1.f, std::min(320 * scale / ss.cx, 200 * scale / ss.cy));
-        int tw_ = std::max(1, (int)(ss.cx * k)), th = std::max(1, (int)(ss.cy * k));
-        cw = tw_ + 2 * pad; ch = th + 2 * pad;
-        DWM_THUMBNAIL_PROPERTIES tp{};
-        tp.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
-        tp.rcDestination = {pad, pad, pad + tw_, pad + th}; tp.fVisible = TRUE; tp.opacity = 255; tp.fSourceClientAreaOnly = FALSE;
-        DwmUpdateThumbnailProperties(prevThumb, &tp);
-    } else { prevThumb = nullptr; prevMini = true; }
-    int x = std::clamp(rowCx - cw / 2, (int)mon.left + 8, (int)mon.right - 8 - cw);
-    SetWindowPos(prevWnd, HWND_TOPMOST, x, bottom + (int)(8 * scale), cw, ch, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    int n = (int)srcs.size();
+    bool titled = !titles.empty();
+    int pad = (int)(10 * scale), gap = (int)(10 * scale), titleH = titled ? (int)(20 * scale) : 0;
+    int monW = mon.right - mon.left;
+    float maxW = n == 1 ? 320 * scale : std::min(240 * scale, (monW * 0.85f - 2 * pad - (n - 1) * gap) / n);
+    float maxH = n == 1 ? 200 * scale : 150 * scale;
+    std::vector<SIZE> sz(n);
+    for (int i = 0; i < n; i++) {
+        HTHUMBNAIL th = nullptr; SIZE ss{};
+        if (IsWindow(srcs[i]) && !IsIconic(srcs[i]) && SUCCEEDED(DwmRegisterThumbnail(prevWnd, srcs[i], &th))) DwmQueryThumbnailSourceSize(th, &ss);
+        if (th && ss.cx > 0 && ss.cy > 0) {
+            float k = std::min(1.f, std::min(maxW / ss.cx, maxH / ss.cy));
+            sz[i] = {std::max(1L, (LONG)(ss.cx * k)), std::max(1L, (LONG)(ss.cy * k))};
+        } else {
+            if (th) { DwmUnregisterThumbnail(th); th = nullptr; }
+            sz[i] = {(LONG)std::min(maxW, 180 * scale), (LONG)std::min(maxH, 110 * scale)};
+        }
+        prevThumbs.push_back(th);
+    }
+    int rowH = 0, totW = 2 * pad + (n - 1) * gap;
+    for (auto& z : sz) { rowH = std::max(rowH, (int)z.cy); totW += z.cx; }
+    int x = pad;
+    for (int i = 0; i < n; i++) {
+        int top = pad + titleH + (rowH - sz[i].cy) / 2;
+        RECT sl{x, top, x + sz[i].cx, top + sz[i].cy};
+        prevSlots.push_back(sl);
+        if (prevThumbs[i]) {
+            DWM_THUMBNAIL_PROPERTIES tp{};
+            tp.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+            tp.rcDestination = sl; tp.fVisible = TRUE; tp.opacity = 255; tp.fSourceClientAreaOnly = FALSE;
+            DwmUpdateThumbnailProperties(prevThumbs[i], &tp);
+        }
+        x += sz[i].cx + gap;
+    }
+    prevSrcs = srcs; prevTitles = titles;
+    int wx = std::clamp(cx - totW / 2, (int)mon.left + 8, (int)mon.right - 8 - totW);
+    SetWindowPos(prevWnd, HWND_TOPMOST, wx, bottom + (int)(8 * scale), totW, 2 * pad + titleH + rowH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(prevWnd, nullptr, TRUE);
 }
 
@@ -3084,17 +3118,38 @@ static void drawFolder(float ox, float oy) {
     gA = ga;
     addHit(ox, oy, EW, EH, H_FOLD_BG);  // un clic fuera la cierra
 }
-// tras cada dibujado: vista previa de la fila de la carpeta que tiene el ratón (wx, wy, wh = ventana de la isla en pantalla)
+// tras cada dibujado: vista previa de lo que tiene el ratón (wx, wy, wh = ventana de la isla en pantalla)
+//  - una app abierta del dock: todas sus ventanas, con su título (como la barra de tareas)
+//  - una fila de la carpeta: esa ventana
 static void updatePreview(int wx, int wy, int wh, bool canShow) {
-    HWND want = nullptr; float rcx = 0;
-    if (canShow && expanded && visible && view == 0 && fldTile >= 0 && hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS
-        && sw.settled() && sh.settled() && tw(24, 1.f, 22) > 0.98f) {
-        int i = fldScroll + hoverId - H_FOLD;
-        if (i < (int)fldWins.size())
-            for (auto& ht : hits) if (ht.id == hoverId) { want = fldWins[i]; rcx = (ht.r.left + ht.r.right) / 2; break; }
+    std::vector<HWND> want; std::vector<std::wstring> titles; float rcx = 0;
+    if (canShow && expanded && visible && view == 0 && sw.settled() && sh.settled()) {
+        if (fldTile >= 0) {
+            if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 22) > 0.98f) {
+                int i = fldScroll + hoverId - H_FOLD;
+                if (i < (int)fldWins.size())
+                    for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); rcx = (ht.r.left + ht.r.right) / 2; break; }
+            }
+        } else if (ctxTile < 0 && hoverId >= H_APP && hoverId < H_APP + (int)tiles.size()) {
+            const Tile& t = tiles[hoverId - H_APP];
+            if (t.run >= 0 && t.run < (int)running.size()) {
+                for (auto& ht : hits) if (ht.id == hoverId) { rcx = (ht.r.left + ht.r.right) / 2; break; }
+                want = running[t.run].wins;
+                std::stable_sort(want.begin(), want.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
+                if (want.size() > 8) want.resize(8);
+                std::wstring app = tileName(t);
+                for (HWND w : want) { std::wstring tt = folderTitle(w, app); titles.push_back(tt.empty() ? app : tt); }
+            }
+        }
     }
-    if (want) showPreview(want, wx + (int)(rcx * scale), wy + wh - (int)(M * scale));
-    else if (prevSrc) hidePreview();
+    if (want.empty()) { prevPending.clear(); KillTimer(gHwnd, T_PREVIEW); if (!prevSrcs.empty()) hidePreview(); return; }
+    int cx = wx + (int)(rcx * scale), bottom = wy + wh - (int)(M * scale);
+    if (!prevSrcs.empty()) { showPreview(want, titles, cx, bottom); return; }  // ya había una: cambia al momento
+    // la primera espera un poco, para que no salte al pasar el ratón de largo
+    ULONGLONG now = nowMs();
+    if (want != prevPending) { prevPending = want; prevPendingAt = now; }
+    if (now - prevPendingAt >= 350) showPreview(want, titles, cx, bottom);
+    else SetTimer(gHwnd, T_PREVIEW, (UINT)(350 - (now - prevPendingAt)) + 15, nullptr);
 }
 
 // ---------------------------------------------------------------- pestaña Herramientas
@@ -4304,6 +4359,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
         else if (wp == T_BTLIST) { KillTimer(h, T_BTLIST); PostMessageW(h, WM_APP_BTLIST, 0, 0); }
+        else if (wp == T_PREVIEW) { KillTimer(h, T_PREVIEW); if (!animating) render(); }
         else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();

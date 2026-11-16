@@ -1,4 +1,4 @@
-﻿<p align="center"><img src="assets/logo-256.png" width="128" alt="logo de islita"></p>
+<p align="center"><img src="assets/logo-256.png" width="128" alt="logo de islita"></p>
 
 <h1 align="center">islita</h1>
 

@@ -2589,7 +2589,8 @@ static std::wstring dotFold(const std::wstring& s) {
 // Se dibuja una vez por canción en una imagen y luego solo se desplaza (va con el mismo ritmo del ecualizador).
 static ID2D1BitmapRenderTarget* mqRT = nullptr; static std::wstring mqKey; static float mqW = 0; static bool mqDots = true;
 static ULONGLONG mqMs = 0, mqLast = 0, mqChangedAt = 0;
-static const float DOT_P = 2.6f, DOT_R = 1.05f; static const int MQ_STEP_MS = 70;
+static const float DOT_P = 2.6f, DOT_R = 1.05f; static const float MQ_SPEED = 32;  // velocidad de la marquesina (DIP/s)
+static int mqTickMs() { return std::clamp((int)lroundf(1000 / (MQ_SPEED * scale)), 16, 50); }  // lo justo para moverse de píxel en píxel
 static void dotCacheClear();
 static void freeMarquee() { SafeRelease(mqRT); mqKey.clear(); dotCacheClear(); }
 static bool buildMarquee(const std::wstring& title, const std::wstring& artist) {
@@ -2645,7 +2646,8 @@ static void drawMarquee(float x, float cy, float w) {
     if (!b) return;
     // animación al cambiar de canción: los puntitos se van encendiendo de izquierda a derecha
     float rev = easeOut(clampf((now - mqChangedAt) / 650.f, 0, 1));
-    float off = fmodf((float)(mqMs / MQ_STEP_MS) * DOT_P, mqW);
+    float off = fmodf(mqMs * MQ_SPEED / 1000.f, mqW);
+    off = roundf(off * scale) / scale; x = roundf(x * scale) / scale;  // a píxeles enteros: se mueve suave y sin emborronarse
     float y = cy - 3.5f * DOT_P, vis = w * rev;
     // bordes que se difuminan: el hueco se pinta en franjas con opacidad creciente
     const int NF = 6; const float F = 16;
@@ -2726,6 +2728,25 @@ static float dotText(const std::wstring& s, float x, float cy, float pitch, D2D1
 // con música, el wifi va justo detrás de la hora en puntitos (carátula 6..28, hora desde 36)
 static float musicStatusX(const std::wstring& tm) { return 36 + dotWidth(tm, 2.0f) + 12; }
 static std::wstring hhmmNow() { SYSTEMTIME st; GetLocalTime(&st); return hhmm(st.wHour * 60 + st.wMinute); }
+// texto de puntitos que cabe en un ancho: primero se encoge (hasta minP) y si aun así no cabe se corta con "..."
+static void dotFit(std::wstring t, float x, float cy, float w, float maxP, float minP, float a) {
+    {   // otros alfabetos (japonés, coreano...): letra normal
+        std::wstring f = dotFold(t); int miss = 0, tot = 0;
+        for (wchar_t c : f) if (c != L' ') { tot++; if (!dotGlyph(c)) miss++; }
+        if (tot && miss * 10 > tot * 3) { col(1, 1, 1, a); text(t, maxP > 2 ? fTitle : fSmall, x, cy - 11, w, 22); return; }
+    }
+    float pz = maxP;
+    while (pz > minP && dotWidth(t, pz) > w) pz = std::max(minP, pz - 0.1f);
+    if (dotWidth(t, pz) > w) {
+        while (t.size() > 1 && dotWidth(t + L"...", pz) > w) t.pop_back();
+        while (!t.empty() && t.back() == L' ') t.pop_back();
+        t += L"...";
+    }
+    dotText(t, x, cy, pz, D2D1_COLOR_F{1, 1, 1, 1}, 0, a);
+}
+struct MqGeo { float x, cy, w, a; };
+static MqGeo mqGeo{}; static bool mqGeoOk = false;
+static D2D1_COLOR_F lastPillBg{0, 0, 0, 1}; static D2D1_ROUNDED_RECT lastPill{}; static int lastW = 0, lastH = 0; static POINT lastDst{}; static BYTE lastAlpha = 255;
 static void drawCollapsed(float px, float py, float pw, int mode) {
     SYSTEMTIME st; GetLocalTime(&st);
     std::wstring tm = hhmm(st.wHour * 60 + st.wMinute);
@@ -2792,6 +2813,7 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         float rs = bx - 12, tx = px + sl + statusLeftW() + 6, tr = rs - statusRightW() - 12;
         drawStatusRight(rs, cy);
         drawMarquee(tx, cy, std::max(0.f, tr - tx));
+        mqGeo = {tx, cy, std::max(0.f, tr - tx), gA}; mqGeoOk = true;
         for (int i = 0; i < 4; i++) {
             float hgt = 3.5f;
             if (media.playing) {
@@ -2822,8 +2844,24 @@ static void drawMusic(float x, float y, float w, float h, int idx) {
     float tx = ax + as + 14, tw_ = x + w - 16 - tx;
     if (has && !media.appId.empty()) addHit(ax, ay, as, as, H_MEDIA_APP);  // la carátula: abre la app donde suena
     if (has) {
-        drawMarquee(tx, ay + 26, tw_);  // título - artista en puntitos, como en la píldora
-        col(1, 1, 1, 0.45f); text(media.app, fSmall, tx, ay + 44, tw_, 18);
+        // título quieto y grande (si no cabe, en dos líneas) y el artista pequeño debajo
+        std::wstring art = media.artist.empty() ? media.app : media.artist;
+        if (dotWidth(media.title, 2.2f) <= tw_) {
+            dotFit(media.title, tx, ay + 26, tw_, 2.6f, 2.2f, 1.f);
+            dotFit(art, tx, ay + 50, tw_, 1.6f, 1.6f, 0.55f);
+        } else {
+            std::wstring l1, rest = media.title;  // primera línea: las palabras que quepan
+            while (!rest.empty()) {
+                size_t sp = rest.find(L' ', 1); std::wstring wd = rest.substr(0, sp);
+                if (!l1.empty() && dotWidth(l1 + wd, 2.2f) > tw_) break;
+                if (l1.empty() && dotWidth(wd, 2.2f) > tw_) break;
+                l1 += wd; rest = sp == std::wstring::npos ? L"" : rest.substr(sp);
+            }
+            while (!rest.empty() && rest[0] == L' ') rest.erase(0, 1);
+            if (l1.empty()) { dotFit(media.title, tx, ay + 26, tw_, 2.2f, 1.9f, 1.f); }
+            else { dotFit(l1, tx, ay + 16, tw_, 2.2f, 2.2f, 1.f); if (!rest.empty()) dotFit(rest, tx, ay + 38, tw_, 2.2f, 2.2f, 1.f); }
+            dotFit(art, tx, ay + 60, tw_, 1.6f, 1.6f, 0.55f);
+        }
     } else {
         col(1, 1, 1, 0.9f); text(L"Nada sonando", fTitle, tx, ay + 20, tw_, 22);
         col(1, 1, 1, 0.45f); text(L"Pon música en cualquier app", fTiny, tx, ay + 44, tw_, 14);
@@ -3902,8 +3940,8 @@ static int wantTick() {
     if (!visible) return tmState == 1 ? 250 : 0;
     if (expanded && view == 1 && swRun) return 50;
     if (expanded && view == 1 && tmState == 1) return 100;
-    if (eqActive() || marqueeActive()) return MQ_STEP_MS;
-    if (expanded && view == 0 && media.playing && !media.title.empty()) return MQ_STEP_MS;  // la marquesina de la tarjeta de música
+    if (marqueeActive()) return mqTickMs();
+    if (eqActive()) return 70;
     if (tmState == 1 || swRun) return 250;
     return 0;
 }
@@ -3941,7 +3979,29 @@ static void buildCache() {
     cacheValid = true;
 }
 
+// paso de la marquesina sin repintar toda la píldora: se borra y se vuelve a pintar solo la franja del texto
+static bool renderMarqueeOnly() {
+    if (!mqGeoOk || animating || !visible || expanded || !rt || !lastW) return false;
+    RECT rc{0, 0, lastW, lastH};
+    dcrt->BindDC(memDC, &rc);
+    rt->BeginDraw();
+    D2D1_MATRIX_3X2_F I{1, 0, 0, 1, 0, 0}; rt->SetTransform(&I);
+    D2D1_RECT_F clip{floorf(mqGeo.x * scale) / scale - 1, mqGeo.cy - 11, ceilf((mqGeo.x + mqGeo.w) * scale) / scale + 1, mqGeo.cy + 11};
+    rt->PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+    D2D1_COLOR_F clear{0, 0, 0, 0}; rt->Clear(&clear);
+    br->SetColor(&lastPillBg); rt->FillRoundedRectangle(&lastPill, br);
+    float ga = gA; gA = mqGeo.a;
+    drawMarquee(mqGeo.x, mqGeo.cy, mqGeo.w);
+    gA = ga;
+    rt->PopAxisAlignedClip();
+    if (rt->EndDraw() == D2DERR_RECREATE_TARGET) { createTarget(); return false; }
+    SIZE sz{lastW, lastH}; POINT src{0, 0};
+    BLENDFUNCTION bf{AC_SRC_OVER, 0, lastAlpha, AC_SRC_ALPHA};
+    UpdateLayeredWindow(gHwnd, nullptr, &lastDst, &sz, memDC, &src, 0, &bf, ULW_ALPHA);
+    return true;
+}
 static void render() {
+    mqGeoOk = false;
     if (sActive && (view != V_SEARCH || !expanded)) endSearch(true);  // se salió del buscador por cualquier vía
     if (!visible || !rt) { updateTick(); return; }
     float w = sw.x, h = sh.x, r = clampf(sr.x, std::min(4.f, h / 2), h / 2);
@@ -3967,7 +4027,7 @@ static void render() {
     {
         bool over = hovered || dragKind != 0;
         bool trans = cfg.transMode == 0 || (cfg.transMode == 1 ? over : !over);
-        gA = 1; col(0, 0, 0, tw(16, trans ? bgAlpha() : 1.f, 9));
+        gA = 1; col(0, 0, 0, tw(16, trans ? bgAlpha() : 1.f, 9)); lastPillBg = br->GetColor();
     }
     D2D1_ROUNDED_RECT pill{{px, py, px + w, py + h}, r, r};
     rt->FillRoundedRectangle(&pill, br);
@@ -4061,6 +4121,7 @@ static void render() {
     SIZE sz{W, H}; POINT src{0, 0};
     BLENDFUNCTION bf{AC_SRC_OVER, 0, (BYTE)lroundf(255 * tw(17, peeking ? 0.06f : 1.f, 20)), AC_SRC_ALPHA};
     UpdateLayeredWindow(gHwnd, nullptr, &dst, &sz, memDC, &src, 0, &bf, ULW_ALPHA);
+    lastPill = pill; lastW = W; lastH = H; lastDst = dst; lastAlpha = bf.SourceConstantAlpha;
     if (!animating && (!springsSettled() || tweensActive())) startAnim();
     updateTick();
 }
@@ -5179,9 +5240,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (alertOn && n - alertAt > (alertPomo ? 6000u : 30000u)) dismissAlert();
             // solo redibujar si cambia lo que se ve (el segundo del contador)
             static ULONGLONG lastShown = ~0ull;
-            bool cont = alertOn || eqActive() || marqueeActive() || (expanded && view == 0 && media.playing) || (expanded && view == 1 && (swRun || tmState == 1));
+            bool cont = alertOn || eqActive() || marqueeActive() || (expanded && view == 1 && (swRun || tmState == 1));
             ULONGLONG shown = (tmRemaining() + 999) / 1000 * 100003 + swElapsed() / 1000 + (expanded ? 7 : 0);
-            if (!animating && (cont || shown != lastShown)) { lastShown = shown; render(); }
+            if (!animating && (cont || shown != lastShown)) {
+                // con solo la marquesina moviéndose se repinta su franja; el ecualizador (cada 70 ms) y lo demás, todo
+                static ULONGLONG lastFull = 0;
+                bool full = shown != lastShown || !marqueeActive() || alertOn || (eqActive() && n - lastFull >= 66);
+                lastShown = shown;
+                if (full || !renderMarqueeOnly()) { render(); lastFull = n; }
+            }
         } else if (wp == T_CLOCK) { scheduleClock(); if (!expanded) collapsedTargets(); if (!animating) render(); }
         else if (wp == T_POLL) {
             if (cfg.hideTaskbar) showTrays(false);  // por si se escapó algún aviso

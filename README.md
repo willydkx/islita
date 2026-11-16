@@ -14,7 +14,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 
 **En reposo**, la píldora muestra la hora, el wifi y el volumen (como en la barra de tareas), la fecha y la batería. Cambia sola según lo que pase:
 
-- Si suena música: carátula, ecualizador con el color de la carátula y el título seguido del artista pasando en bucle con letras de puntitos (como la tipografía del Nothing Phone), sin quitar la hora, el wifi, el volumen, la fecha ni la batería. Al cambiar de canción los puntitos se van encendiendo; en pausa se para. Solo se mueve con la píldora a la vista y va al mismo ritmo que el ecualizador, así que no gasta más.
+- Si suena música: carátula, ecualizador con el color de la carátula y el título seguido del artista pasando en bucle con letras de puntitos (como la tipografía del Nothing Phone), sin quitar la hora, el wifi, el volumen, la fecha ni la batería. Al cambiar de canción los puntitos se van encendiendo; en pausa se para. Se desliza de píxel en píxel y en cada paso solo se repinta la franja del texto; solo se mueve con la píldora a la vista.
 - Si tienes un evento pronto: "Clase en 20 min".
 - Con el temporizador en marcha: la cuenta atrás con un anillo de progreso, también junto al resto de la información.
 - Al enchufar el cargador: un rayo animado y la batería llenándose hasta el porcentaje real. Mientras está enchufado sale un rayito al lado de la batería.
@@ -35,7 +35,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 **Al hacer clic** en la isla se abre un panel con tres pestañas. La hora, la fecha, los títulos y los números grandes van en letras de puntitos, a juego con la marquesina de la música (cada texto se dibuja una vez y se reutiliza, así que no gasta más):
 
 - **Inicio**
-  - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente. Un clic en la carátula abre la app donde está sonando (en el navegador, la ventana de la canción).
+  - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente. El título va quieto y grande en puntitos (en dos líneas si es largo) y el artista pequeño debajo. Un clic en la carátula abre la app donde está sonando (en el navegador, la ventana de la canción).
   - Calendario del mes con puntos en los días con eventos; al pulsar un día ves su agenda.
   - Temperatura y uso de CPU y GPU, y la RAM.
 - **Herramientas**

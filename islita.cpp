@@ -56,7 +56,7 @@ static const float CW_IDLE = 276, CW_PLAY = 304, CW_EVENT = 340;  // ancho de la
 static const float TOPGAP = 6;                    // separación con el borde superior
 static const float M = 18;                        // margen para la sombra
 
-enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES, T_BTLIST, T_PREVIEW };
+enum { T_TICK = 1, T_CLOCK, T_POLL, T_COLLAPSE, T_TRIM, T_HOVER, T_PEEK, T_CARET, T_TILES, T_BTLIST, T_PREVIEW, T_EVSHOW };
 enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_NET, WM_APP_VOL, WM_APP_VOLDEV, WM_APP_TESTCHARGE, WM_APP_TRAY, WM_APP_BTLIST, WM_APP_RADIO };  // TESTCHARGE: ver la animación de carga sin desenchufar
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK, H_NET_BTN, H_BT_BTN, H_NET_MORE, H_BT_MORE, H_NET_DISC, H_NET_TOG, H_BT_TOG,
@@ -3887,9 +3887,24 @@ static void render() {
 }
 
 // ---------------------------------------------------------------- animación (al ritmo de la pantalla)
+// Un evento a punto de empezar saca la isla de la rayita solo un rato: 2 min al entrar en los 15 min
+// de antes y 1 min más cuando empieza. Un temporizador de un solo disparo la vuelve a encoger (sin sondear).
+static bool eventShouts() {
+    int em = 0; const CalEvent* e = cfg.alerts ? upcomingEvent(&em) : nullptr;
+    if (!e || em > 15) return false;
+    static std::wstring key; static ULONGLONG at = 0; static bool started = false;
+    std::wstring k = e->title + L"|" + std::to_wstring(e->day) + L"|" + std::to_wstring(e->start);
+    ULONGLONG n = nowMs();
+    if (k != key) { key = k; at = n; started = em <= 0; }
+    else if (em <= 0 && !started) { started = true; at = n; }
+    ULONGLONG len = started ? 60000 : 120000;
+    if (n - at >= len) return false;
+    SetTimer(gHwnd, T_EVSHOW, (UINT)(len - (n - at)) + 50, nullptr);
+    return true;
+}
 static void collapsedTargets() {
     int mode = pillMode();
-    int em = 0; bool soon = cfg.alerts && upcomingEvent(&em) && em <= 15;
+    bool soon = eventShouts();
     if (discreet && !hovered && !alertOn && !chargeOn && !soon && !peeking) { sw.t = 120; sh.t = 5; sr.t = 2.5f; return; }
     float w = mode == PM_EVENT ? CW_EVENT : mode == PM_MUSIC ? CW_PLAY : mode == PM_ALERT ? 300.f : mode == PM_CHARGE ? 290.f : CW_IDLE, h = CH;
     if (mode == PM_IDLE && !shelf.empty()) w += 30;
@@ -4373,6 +4388,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
         else if (wp == T_BTLIST) { KillTimer(h, T_BTLIST); PostMessageW(h, WM_APP_BTLIST, 0, 0); }
         else if (wp == T_PREVIEW) { KillTimer(h, T_PREVIEW); if (!animating) render(); }
+        else if (wp == T_EVSHOW) { KillTimer(h, T_EVSHOW); if (!expanded) { collapsedTargets(); startAnim(); } }
         else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();

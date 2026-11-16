@@ -2425,6 +2425,40 @@ static int volIcon() {  // 0 sin dispositivo, 1 silencio, 2..5 nivel
 static bool onAC() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.ACLineStatus == 1; }
 static bool hasBattery() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100; }
 
+// ---- estado (wifi, volumen, bandeja, día, batería): lo enseña la píldora en todos los modos normales
+static std::wstring shortDate() {
+    SYSTEMTIME st; GetLocalTime(&st);
+    return std::wstring(DOW[st.wDayOfWeek]) + L" " + std::to_wstring(st.wDay) + L" " + MON[st.wMonth - 1];
+}
+static float batteryW() { return cfg.battery && hasBattery() ? 24 + 40 + (onAC() ? 10.f : 0.f) : 0.f; }
+// ancho de la parte izquierda a partir del centro del icono del wifi
+static float statusLeftW() { return shelf.empty() ? 34.f : 64.f; }
+// ancho de la parte derecha (día + batería + cafeína)
+static float statusRightW() { return batteryW() + textWidth(shortDate(), fSmall) + (caffeine ? 22.f : 0.f); }
+// wifi, volumen y bandeja; x = centro del icono del wifi
+static void drawStatusLeft(float x, float cy) {
+    if (netKind == 1) {
+        static const wchar_t* W[5] = {L"", L"", L"", L"", L""};
+        col(1, 1, 1, 0.25f); glyph(L"", fIcon, x, cy);
+        col(1, 1, 1, 0.85f); glyph(W[std::clamp(netBars, 1, 4)], fIcon, x, cy);
+    } else if (netKind == 2) { col(1, 1, 1, 0.85f); glyph(L"", fIcon, x, cy); }
+    else { col(1, 1, 1, 0.45f); glyph(L"", fIcon, x, cy); }
+    static const wchar_t* V[6] = {L"", L"", L"", L"", L"", L""};
+    int vi = volIcon();
+    if (vi) { col(1, 1, 1, vi == 1 ? 0.5f : 0.85f); glyph(V[vi], fIcon, x + 22, cy); }
+    if (!shelf.empty()) { col(1, 1, 1, 0.55f); glyph(L"", fIcon, x + 46, cy); textN(std::to_wstring(shelf.size()), fTiny, x + 56, cy - 8, 24, 16); }
+}
+// día, batería y cafeína pegados a la derecha (right = borde derecho)
+static void drawStatusRight(float right, float cy) {
+    std::wstring d = shortDate();
+    if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= batteryW(); }
+    float dwid = textWidth(d, fSmall);
+    col(1, 1, 1, 0.55f); text(d, fSmall, right - 90, cy - 9, 90, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    if (caffeine) { colC(ACC()); glyph(L"", fIcon, right - dwid - 14, cy); }
+}
+// lo que ocupa el contador del temporizador o del cronómetro (con o sin horas)
+static float counterW(bool hours) { return textWidth(hours ? L"0:00:00" : L"00:00", fTime); }
+
 static void drawCollapsed(float px, float py, float pw, int mode) {
     SYSTEMTIME st; GetLocalTime(&st);
     std::wstring tm = hhmm(st.wHour * 60 + st.wMinute);
@@ -2459,14 +2493,19 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         ULONGLONG rem = tmRemaining();
         float a = tmState == 2 ? 0.5f : 1.f;
         float rx = px + pw - 16 - 8;
+        drawStatusLeft(px + 78, cy);
+        drawStatusRight(rx - 14 - counterW(rem >= 3600000) - 16, cy);
         float ga = gA; gA *= a;
         ring(rx, cy, 7.5f, tmDur ? (float)rem / tmDur : 0, timerColor(), 2.4f);
         colC(timerColor()); textN(fmtClock(rem, true), fTime, rx - 14 - 80, cy - 10, 80, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
         gA = ga;
     } else if (mode == PM_SW) {
         col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
+        ULONGLONG el = swElapsed();
+        drawStatusLeft(px + 78, cy);
+        drawStatusRight(px + pw - 16 - 20 - counterW(el >= 3600000) - 16, cy);
         colC(ORANGE); glyph(L"\uE916", fIcon, px + pw - 16 - 7, cy);
-        col(1, 1, 1, 0.9f); textN(fmtClock(swElapsed(), false), fTime, px + pw - 16 - 20 - 80, cy - 10, 80, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        col(1, 1, 1, 0.9f); textN(fmtClock(el, false), fTime, px + pw - 16 - 20 - 80, cy - 10, 80, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (mode == PM_EVENT) {
         int mins = 0; const CalEvent* e = upcomingEvent(&mins);
         if (!e) return;
@@ -2480,8 +2519,11 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         if (artSBmp) drawBitmapRounded(artSBmp, ax, cy - 11, 22, 6, 1);
         else { col(0.22f, 0.22f, 0.24f); fillRR(ax, cy - 11, 22, 22, 6); col(1, 1, 1, 0.7f); text(L"♪", fSmall, ax, cy - 11, 22, 22, DWRITE_TEXT_ALIGNMENT_CENTER); }
         col(1, 1, 1); textN(tm, fTime, ax + 30, cy - 10, 46, 20);
-        col(1, 1, 1, 0.55f); text(media.title, fSmall, ax + 80, cy - 9, pw - 80 - 6 - 40, 18);
         float bx = px + pw - 14 - 19;
+        drawStatusLeft(px + 96, cy);
+        float rs = bx - 12, tx = px + 96 + statusLeftW() + 6, tr = rs - statusRightW() - 12;
+        drawStatusRight(rs, cy);
+        col(1, 1, 1, 0.55f); text(media.title, fSmall, tx, cy - 9, std::max(0.f, tr - tx), 18);
         for (int i = 0; i < 4; i++) {
             float hgt = 3.5f;
             if (media.playing) {
@@ -2494,23 +2536,8 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
     } else {
         col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
         // wifi y volumen, como en la barra de tareas
-        float nx = px + 78, vx = px + 100;
-        if (netKind == 1) {
-            static const wchar_t* W[5] = {L"\uE701", L"\uE872", L"\uE873", L"\uE874", L"\uE701"};
-            col(1, 1, 1, 0.25f); glyph(L"\uE701", fIcon, nx, cy);
-            col(1, 1, 1, 0.85f); glyph(W[std::clamp(netBars, 1, 4)], fIcon, nx, cy);
-        } else if (netKind == 2) { col(1, 1, 1, 0.85f); glyph(L"\uE839", fIcon, nx, cy); }
-        else { col(1, 1, 1, 0.45f); glyph(L"\uF384", fIcon, nx, cy); }
-        static const wchar_t* V[6] = {L"", L"\uE74F", L"\uE992", L"\uE993", L"\uE994", L"\uE995"};
-        int vi = volIcon();
-        if (vi) { col(1, 1, 1, vi == 1 ? 0.5f : 0.85f); glyph(V[vi], fIcon, vx, cy); }
-        if (!shelf.empty()) { col(1, 1, 1, 0.55f); glyph(L"", fIcon, px + 124, cy); textN(std::to_wstring(shelf.size()), fTiny, px + 134, cy - 8, 24, 16); }
-        std::wstring d = std::wstring(DOW[st.wDayOfWeek]) + L" " + std::to_wstring(st.wDay) + L" " + MON[st.wMonth - 1];
-        float right = px + pw - 15;
-        if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= 24 + 40 + (onAC() ? 10 : 0); }
-        float dwid = textWidth(d, fSmall);
-        col(1, 1, 1, 0.55f); text(d, fSmall, right - 90, cy - 9, 90, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
-        if (caffeine) { colC(ACC()); glyph(L"\uE706", fIcon, right - dwid - 14, cy); }
+        drawStatusLeft(px + 78, cy);
+        drawStatusRight(px + pw - 15, cy);
     }
 }
 
@@ -3625,6 +3652,11 @@ static void collapsedTargets() {
     if (discreet && !hovered && !alertOn && !chargeOn && !soon && !peeking) { sw.t = 120; sh.t = 5; sr.t = 2.5f; return; }
     float w = mode == PM_EVENT ? CW_EVENT : mode == PM_MUSIC ? CW_PLAY : mode == PM_ALERT ? 300.f : mode == PM_CHARGE ? 290.f : CW_IDLE, h = CH;
     if (mode == PM_IDLE && !shelf.empty()) w += 30;
+    // temporizador, cronómetro y música también llevan el estado (wifi, volumen, día, batería)
+    float left = 78 + statusLeftW() + 12;
+    if (mode == PM_TIMER) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(tmRemaining() >= 3600000) + 38);
+    else if (mode == PM_SW) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(swElapsed() >= 3600000) + 36);
+    else if (mode == PM_MUSIC) w = 96 + statusLeftW() + 6 + 130 + 12 + statusRightW() + 12 + 33;
     if (hovered) { w += 10; h += 3; }
     sw.t = w; sh.t = h; sr.t = h / 2;
 }
@@ -3702,7 +3734,7 @@ static bool foregroundUnderIsland() {
     if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
     RECT r;
     if (FAILED(DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r)) && !GetWindowRect(fg, &r)) return false;
-    int cx = (mon.left + mon.right) / 2, half = (int)(CW_EVENT / 2 * scale);
+    int cx = (mon.left + mon.right) / 2, half = (int)(std::max(CW_EVENT, sw.x) / 2 * scale);
     int bottom = mon.top + (int)((TOPGAP + CH + 4) * scale);
     return r.left < cx + half && r.right > cx - half && r.top < bottom && r.bottom > mon.top;
 }

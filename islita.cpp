@@ -61,7 +61,7 @@ enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK, H_NET_BTN, H_BT_BTN, H_NET_MORE, H_BT_MORE, H_NET_DISC, H_NET_TOG, H_BT_TOG,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950, H_NET = 1000, H_BT = 1030 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950, H_NET = 1000, H_BT = 1030, H_FOLD_BG = 1100, H_FOLD = 1101 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -1046,6 +1046,7 @@ struct Tile { int pin = -1, run = -1; };  // índice en apps (atajo) y/o en runn
 static std::vector<RunApp> running; static std::vector<std::wstring> runOrder; static std::vector<Tile> tiles;
 static std::map<std::wstring, ID2D1Bitmap*> runIcons; static std::map<std::wstring, std::wstring> runNames;
 static HWND fgAtOpen = nullptr;
+static std::map<HWND, unsigned> winSeq; static unsigned winSeqN = 0;  // orden de llegada de cada ventana: numeración estable en la carpeta
 static const int MAX_TILES = 59;
 static const PROPERTYKEY PKEY_AUMID_ = {{0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
 static const PROPERTYKEY PKEY_LinkTarget_ = {{0xB9B4B3FC, 0x2B51, 0x4A42, {0xB5, 0xD8, 0x32, 0x41, 0x46, 0xAF, 0xCF, 0x25}}, 2};
@@ -1087,6 +1088,8 @@ static BOOL CALLBACK enumUwpChild(HWND h, LPARAM lp) {
 }
 static void refreshRunning() {
     std::vector<HWND> ws; EnumWindows(enumTaskWin, (LPARAM)&ws);
+    for (auto it = winSeq.begin(); it != winSeq.end();) { if (IsWindow(it->first)) ++it; else it = winSeq.erase(it); }
+    for (auto it = ws.rbegin(); it != ws.rend(); ++it) if (!winSeq.count(*it)) winSeq[*it] = ++winSeqN;  // las de atrás primero
     std::map<std::wstring, RunApp> m; std::vector<std::wstring> seen;
     for (HWND h : ws) {
         DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
@@ -2726,6 +2729,13 @@ static void drawAppSlot(int i, float ix, float iy, float is, float gap, float co
                 float gp = 5.2f, x0 = ix + is / 2 - (nd - 1) * gp / 2;
                 for (int k = 0; k < nd; k++) fillRR(x0 + k * gp - 1.6f, iy + is + 2, 3.2f, 3, 1.5f);
             }
+            if (r.wins.size() > 3) {  // con más de 3 los puntitos se quedan cortos: globito con el número
+                std::wstring nn = std::to_wstring(std::min((int)r.wins.size(), 99));
+                float bw = std::max(15.f, textWidth(nn, fTiny) + 8), bx = ox + s - bw + 5, by = oy - 5;
+                col(0.1f, 0.1f, 0.11f); fillRR(bx - 1.5f, by - 1.5f, bw + 3, 18, 9);
+                colC(ACC()); fillRR(bx, by, bw, 15, 7.5f);
+                col(1, 1, 1); textN(nn, fTiny, bx, by, bw, 15, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
         }
         col(1, 1, 1, 0.55f + 0.4f * hv(id));
         text(name, fApp, ix - gap / 2, iy + is + 5, colW, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2924,6 +2934,89 @@ static void ctxRun(int item) {
         for (HWND w : running[t.run].wins) PostMessage(w, WM_SYSCOMMAND, SC_CLOSE, 0);  // como "Cerrar ventana" de la barra de tareas
         SetTimer(gHwnd, T_TILES, 500, nullptr);  // las ventanas tardan un poco en cerrarse
     }
+}
+
+// ---------------------------------------------------------------- carpeta: las ventanas de una app, numeradas (como las carpetas del iPhone)
+static int fldTile = -1, fldScroll = 0; static D2D1_RECT_F fldAnchor{}; static std::vector<HWND> fldWins; static HWND fldPrevFg = nullptr;
+static const int FLD_ROWS = 6;
+static void openFolder(int tile) {
+    const RunApp& r = running[tiles[tile].run];
+    fldWins = r.wins;
+    std::stable_sort(fldWins.begin(), fldWins.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
+    fldTile = tile; fldScroll = 0; twSnap(24, 0);
+    for (auto& ht : hits) if (ht.id == H_APP + tile) { fldAnchor = ht.r; break; }
+    HWND fg = GetForegroundWindow(); fldPrevFg = fg != gHwnd ? fg : fgAtOpen;
+    grabFocus();  // para poder elegir con el número
+    hoverId = H_NONE;
+}
+static void closeFolder(bool restoreFocus) {
+    if (fldTile < 0) return;
+    fldTile = -1; fldWins.clear();
+    if (restoreFocus && GetForegroundWindow() == gHwnd && fldPrevFg && IsWindow(fldPrevFg)) SetForegroundWindow(fldPrevFg);
+    fldPrevFg = nullptr;
+}
+static void folderPick(int i) {
+    if (i < 0 || i >= (int)fldWins.size()) return;
+    HWND w = fldWins[i];
+    closeFolder(false);
+    if (IsWindow(w)) forceForeground(w); else SetTimer(gHwnd, T_TILES, 100, nullptr);
+}
+static std::wstring folderTitle(HWND w, const std::wstring& app) {
+    wchar_t b[256]; int n = GetWindowTextW(w, b, 256);
+    std::wstring t(b, std::max(n, 0));
+    // "Aula Global - Google Chrome" -> "Aula Global": el nombre de la app ya está arriba
+    for (const wchar_t* sep : {L" - ", L" \u2014 ", L" \u2013 "}) {
+        std::wstring tail = sep + app;
+        if (t.size() > tail.size() && !_wcsicmp(t.c_str() + t.size() - tail.size(), tail.c_str())) { t.resize(t.size() - tail.size()); break; }
+    }
+    return t;
+}
+static void drawFolder(float ox, float oy) {
+    if (fldTile < 0 || fldTile >= (int)tiles.size()) return;
+    const Tile& t = tiles[fldTile];
+    int n = (int)fldWins.size(), rows = std::min(n, FLD_ROWS);
+    fldScroll = std::clamp(fldScroll, 0, std::max(0, n - FLD_ROWS));
+    const float W = 300, RH = 30, HD = 32, P = 6;
+    float h = HD + rows * RH + P;
+    float x = std::max(ox + 12, fldAnchor.left - W - 6), y = std::clamp(fldAnchor.top - 6, oy + 46, oy + EH - 10 - h);
+    float a = easeOut(tw(24, 1.f, 22)), ga = gA; gA = ga * a;
+    float sc = 0.92f + 0.08f * a;
+    D2D1_MATRIX_3X2_F base; rt->GetTransform(&base);
+    float cx = x + W, cy = y;  // crece desde la app
+    D2D1_MATRIX_3X2_F m{sc, 0, 0, sc, cx - sc * cx, cy - sc * cy};
+    D2D1_MATRIX_3X2_F mb = mmul(m, base); rt->SetTransform(&mb);
+    col(0, 0, 0, 0.35f); fillRR(x - 1, y + 2, W + 2, h + 2, 15);  // sombra
+    col(0.165f, 0.165f, 0.175f); fillRR(x, y, W, h, 14);
+    col(1, 1, 1, 0.1f); D2D1_ROUNDED_RECT rr{{x, y, x + W, y + h}, 14, 14}; rt->DrawRoundedRectangle(&rr, br, 1, nullptr);
+    std::wstring app = tileName(t);
+    if (ID2D1Bitmap* b = tileIcon(t)) { D2D1_RECT_F d{x + 12, y + 8, x + 28, y + 24}; rt->DrawBitmap(b, &d, gA, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr); }
+    col(1, 1, 1, 0.75f); text(app, fSmall, x + 34, y + 6, W - 34 - 90, 20);
+    col(1, 1, 1, 0.38f); text(std::to_wstring(n) + L" ventanas", fTiny, x + W - 100, y + 6, 88, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    col(1, 1, 1, 0.08f); fillRR(x + 8, y + HD - 1, W - 16, 1, 0.5f);
+    for (int k = 0; k < rows; k++) {
+        int i = fldScroll + k, id = H_FOLD + k;
+        HWND w = fldWins[i];
+        float ry = y + HD + 2 + k * RH;
+        col(1, 1, 1, 0.1f * hv(id) + 0.06f * prs(id)); fillRR(x + 5, ry, W - 10, RH - 2, 9);
+        bool act = w == fgAtOpen, mini = IsIconic(w) != 0;
+        // número (con el teclado: pulsarlo abre esa ventana)
+        float bx = x + 13, by = ry + (RH - 2) / 2 - 9;
+        if (act) colC(ACC()); else col(1, 1, 1, 0.12f + 0.06f * hv(id));
+        fillRR(bx, by, 18, 18, 5.5f);
+        col(1, 1, 1, i < 9 ? 0.95f : 0.5f); textN(std::to_wstring(i + 1), fTiny, bx, by, 18, 18, DWRITE_TEXT_ALIGNMENT_CENTER);
+        float tw_ = W - 46 - 12 - (mini ? 68 : 0);
+        std::wstring ttl = IsWindow(w) ? folderTitle(w, app) : L"(cerrada)";
+        col(1, 1, 1, mini ? 0.5f : 0.92f); text(ttl.empty() ? app : ttl, fSmall, x + 40, ry, tw_, RH - 2);
+        if (mini) { col(1, 1, 1, 0.32f); text(L"minimizada", fTiny, x + W - 12 - 66, ry, 62, RH - 2, DWRITE_TEXT_ALIGNMENT_TRAILING); }
+        addHit(x + 5, ry, W - 10, RH - 2, id);
+    }
+    if (n > FLD_ROWS) {  // barra de desplazamiento
+        float th = rows * RH - 4, ty = y + HD + 4, kh = std::max(16.f, th * FLD_ROWS / n), ky = ty + (th - kh) * fldScroll / (float)(n - FLD_ROWS);
+        col(1, 1, 1, 0.2f); fillRR(x + W - 4.5f, ky, 2.5f, kh, 1.25f);
+    }
+    rt->SetTransform(&base);
+    gA = ga;
+    addHit(ox, oy, EW, EH, H_FOLD_BG);  // un clic fuera la cierra
 }
 
 // ---------------------------------------------------------------- pestaña Herramientas
@@ -3454,6 +3547,7 @@ static void drawView(int v, float ox, float y) {
         drawStats(x, y, 110, h, 2); x += 120;
         drawApps(x, y, ox + EW - 12 - x, h, 3);
         if (ctxTile >= 0) { size_t n0 = hits.size(); drawCtx(ox, y - 44); std::rotate(hits.begin(), hits.begin() + n0, hits.end()); }
+        if (fldTile >= 0) { size_t n0 = hits.size(); drawFolder(ox, y - 44); std::rotate(hits.begin(), hits.begin() + n0, hits.end()); }
     } else if (v == V_TOOLS) {
         drawTimer(x, y, 250, h, 0); x += 260;
         drawNextEvent(x, y, 210, h, 1); x += 220;
@@ -3711,7 +3805,7 @@ static void setExpanded(bool e, int v = -1) {
         SetEvent(gWake);
     } else {
         gExpandedA = false;
-        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; ctxTile = -1; collapsedTargets();
+        hoverId = pressId = H_NONE; dragKind = 0; dropHover = false; openedByDrag = false; ctxTile = -1; closeFolder(true); collapsedTargets();
     }
     startAnim();
 }
@@ -3805,7 +3899,7 @@ static void ensureTopmost() {
         if (IntersectRect(&x, &r, &me)) { SetWindowPos(gHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); return; }
     }
 }
-static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (visible) ensureTopmost(); if (expanded && !sActive && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
+static void CALLBACK winEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { checkFullscreen(); if (visible) ensureTopmost(); if (expanded && !sActive && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
 
 static void scheduleClock() {
     SYSTEMTIME st; GetLocalTime(&st);
@@ -3872,12 +3966,15 @@ static void click(int id) {
     else if (id > H_DAY && id < H_DAY + 32) selDay = id - H_DAY;
     else if (id == H_CBACK) selDay = 0;
     else if (id == H_COPEN || (id >= H_EVT && id < H_EVT + 100)) { openCalendarDay(calY, calM, selDay); return; }
+    else if (id == H_FOLD_BG) closeFolder(true);
+    else if (id >= H_FOLD && id < H_FOLD + FLD_ROWS) folderPick(fldScroll + id - H_FOLD);
     else if (id == H_CTX_BG) ctxTile = -1;
     else if (id >= H_CTX && id < H_CTX + 8) ctxRun(id - H_CTX);
     else if (id >= H_APP && id < H_APP + (int)tiles.size()) {
         // la isla se queda abierta hasta que se aparte el ratón
         Tile t = tiles[id - H_APP];
-        if (t.run >= 0) activateRun(running[t.run]);
+        if (t.run >= 0 && running[t.run].wins.size() >= 2) openFolder(id - H_APP);  // varias ventanas: se elige cuál
+        else if (t.run >= 0) activateRun(running[t.run]);
         else { App& a = apps[t.pin]; ShellExecuteW(nullptr, L"open", a.target.c_str(), a.args.empty() ? nullptr : a.args.c_str(), nullptr, SW_SHOWNORMAL); SetTimer(gHwnd, T_TILES, 1500, nullptr); }
     }
     else if (id == H_TM_MODE || id == H_TM_MODE + 1) { dismissAlert(); setPomo(id == H_TM_MODE + 1); }
@@ -4128,7 +4225,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (visible) ensureTopmost();
         } else if (wp == T_COLLAPSE) { KillTimer(h, T_COLLAPSE); if (!sActive) setExpanded(false); }
         else if (wp == T_BTLIST) { KillTimer(h, T_BTLIST); PostMessageW(h, WM_APP_BTLIST, 0, 0); }
-        else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0) { refreshTiles(); if (!animating) render(); } }
+        else if (wp == T_TILES) { KillTimer(h, T_TILES); if (expanded && ctxTile < 0 && fldTile < 0) { refreshTiles(); if (!animating) render(); } }
         else if (wp == T_CARET) { if (!sActive) { KillTimer(h, T_CARET); return 0; } sCaret = !sCaret; if (!animating) render(); }
         else if (wp == T_PEEK) peekTick();
         else if (wp == T_HOVER) { KillTimer(h, T_HOVER); if (hovered && !expanded) openFromPill(); }
@@ -4195,6 +4292,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LPARAM cl = MAKELPARAM(pt.x, pt.y);
         int id = hitAt(cl), d = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
         if (view == V_SEARCH) { sScroll = std::clamp(sScroll + d, 0, sMaxScroll()); render(); return 0; }
+        if (fldTile >= 0) { fldScroll = std::clamp(fldScroll + d, 0, std::max(0, (int)fldWins.size() - FLD_ROWS)); render(); return 0; }
         if ((wifiOpen || btOpen) && ((id >= H_NET && id < H_NET + 12) || (id >= H_BT && id < H_BT + 12) || id == H_NET_MORE || id == H_BT_MORE || id == H_NET_DISC)) {
             listScroll = std::max(0, listScroll + d); render(); return 0;
         }
@@ -4214,6 +4312,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_KEYDOWN: {
+        if (fldTile >= 0) {
+            if (wp >= '1' && wp <= '9') folderPick((int)wp - '1');
+            else if (wp >= VK_NUMPAD1 && wp <= VK_NUMPAD9) folderPick((int)(wp - VK_NUMPAD1));
+            else if (wp == VK_ESCAPE) closeFolder(true);
+            else return 0;
+            render(); return 0;
+        }
         if (!sActive) break;
         int n = (int)sRes.size(); bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         sCaret = true; SetTimer(h, T_CARET, 530, nullptr);
@@ -4255,6 +4360,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && fldTile >= 0) { closeFolder(false); if (!animating) render(); }
         // se hizo clic en otra ventana mientras se buscaba: se cierra
         if (LOWORD(wp) == WA_INACTIVE && sActive) { endSearch(false); if (!hovered) setExpanded(false); else render(); }
         break;
@@ -4295,6 +4401,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_RBUTTONUP:
         if (expanded) {
+            if (fldTile >= 0) { closeFolder(true); render(); return 0; }
             int id = hitAt(lp);
             if (id >= H_APP && id < H_APP + (int)tiles.size()) {  // clic derecho en una app: su menú
                 ctxTile = id - H_APP; twSnap(20, 0);

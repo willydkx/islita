@@ -2100,7 +2100,10 @@ static void beginCard(int i, float& y) {
     float s = easeOut((gOpen - i * 0.07f) / (1 - 0.21f));
     gA = gViewA * s; y += (1 - s) * 10;
 }
-static void cardTitle(const wchar_t* t, float x, float y, D2D1_COLOR_F c, float a = 1) { colC(c, a); text(t, fCalHead, x + 16, y + 12, 160, 18); }
+static float dotText(const std::wstring& s, float x, float cy, float pitch, D2D1_COLOR_F c, int align = 0, float a = 1);
+static float dotWidth(const std::wstring& s, float pitch);
+static const float DOT_TITLE = 1.7f;  // títulos de las tarjetas
+static void cardTitle(const wchar_t* t, float x, float y, D2D1_COLOR_F c, float a = 1) { dotText(t, x + 16, y + 21, DOT_TITLE, c, 0, a); }
 static void switchCtl(float x, float cy, bool on, int key, int id) {
     float t = tw(200000 + key, on ? 1.f : 0.f, 15), h = hv(id);
     D2D1_COLOR_F off{0.27f + 0.05f * h, 0.27f + 0.05f * h, 0.29f + 0.05f * h, 1};
@@ -2467,7 +2470,7 @@ static float statusLeftW() { return shelf.empty() ? 34.f : 64.f; }
 // ancho de la parte derecha (día + batería + cafeína)
 static float dateW(const std::wstring& d) {
     static std::wstring last; static float w = 0;
-    if (d != last) { last = d; w = textWidth(d, fSmall); }
+    if (d != last) { last = d; w = dotWidth(d, 1.6f); }
     return w;
 }
 static float statusRightW() { return batteryW() + dateW(shortDate()) + (caffeine ? 22.f : 0.f); }
@@ -2489,11 +2492,11 @@ static void drawStatusRight(float right, float cy) {
     std::wstring d = shortDate();
     if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= batteryW(); }
     float dwid = dateW(d);
-    col(1, 1, 1, 0.55f); text(d, fSmall, right - 90, cy - 9, 90, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    dotText(d, right, cy, 1.6f, D2D1_COLOR_F{1, 1, 1, 1}, 2, 0.6f);
     if (caffeine) { colC(ACC()); glyph(L"", fIcon, right - dwid - 14, cy); }
 }
 // lo que ocupa el contador del temporizador o del cronómetro (con o sin horas)
-static float counterW(bool hours) { return textWidth(hours ? L"0:00:00" : L"00:00", fTime); }
+static float counterW(bool hours) { return dotWidth(hours ? L"0:00:00" : L"00:00", 2.0f); }
 
 // ---------------------------------------------------------------- letras de puntitos (estilo de la tipografía del Nothing Phone)
 // Matriz de 7 filas; cada letra con su ancho. Todo en mayúsculas y sin tildes (salvo la Ñ).
@@ -2559,6 +2562,9 @@ static const DotGlyph DOTS[] = {
     {L'$', {"..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."}},
     {L'@', {".###.", "#...#", "#.###", "#.#.#", "#.##.", "#....", ".###."}},
     {L'=', {".....", ".....", "#####", ".....", "#####", ".....", "....."}},
+    {L'\u00B0', {".#.", "#.#", ".#.", "...", "...", "...", "..."}},
+    {L'<', {"...#", "..#.", ".#..", "#...", ".#..", "..#.", "...#"}},
+    {L'>', {"#...", ".#..", "..#.", "...#", "..#.", ".#..", "#..."}},
 };
 static const DotGlyph* dotGlyph(wchar_t c) { for (auto& g : DOTS) if (g.c == c) return &g; return nullptr; }
 // mayúsculas y sin tildes (la Ñ se queda); comillas y guiones raros a los normales
@@ -2584,7 +2590,8 @@ static std::wstring dotFold(const std::wstring& s) {
 static ID2D1BitmapRenderTarget* mqRT = nullptr; static std::wstring mqKey; static float mqW = 0; static bool mqDots = true;
 static ULONGLONG mqMs = 0, mqLast = 0, mqChangedAt = 0;
 static const float DOT_P = 2.6f, DOT_R = 1.05f; static const int MQ_STEP_MS = 70;
-static void freeMarquee() { SafeRelease(mqRT); mqKey.clear(); }
+static void dotCacheClear();
+static void freeMarquee() { SafeRelease(mqRT); mqKey.clear(); dotCacheClear(); }
 static bool buildMarquee(const std::wstring& title, const std::wstring& artist) {
     std::wstring key = title + L"\x1f" + artist;
     if (key == mqKey) return mqDots ? mqRT != nullptr : true;
@@ -2660,6 +2667,65 @@ static void drawMarquee(float x, float cy, float w) {
     b->Release();
 }
 
+// Texto de puntitos para la interfaz (títulos, hora, números grandes). Cada texto se dibuja una sola vez en una
+// imagen pequeña (por texto, tamaño y color) y después solo se copia: no gasta más que una letra normal.
+struct DotImg { ID2D1Bitmap* bmp = nullptr; float w = 0; };
+static std::map<std::wstring, DotImg> dotCache;
+static void dotCacheClear() { for (auto& p : dotCache) SafeRelease(p.second.bmp); dotCache.clear(); }
+static int dotCols(const std::wstring& f) {  // columnas que ocupa un texto ya en mayúsculas
+    int n = 0;
+    for (wchar_t c : f) {
+        if (c == L' ') { n += 3; continue; }
+        const DotGlyph* g = dotGlyph(c); if (!g) g = dotGlyph(L'?');
+        n += (int)strlen(g->r[0]) + 1;
+    }
+    return n > 0 ? n - 1 : 0;
+}
+static float dotWidth(const std::wstring& s, float pitch) { return dotCols(dotFold(s)) * pitch; }
+// align: 0 izquierda (x = borde izquierdo), 1 centrado (x = centro), 2 derecha (x = borde derecho); cy = centro vertical
+static float dotText(const std::wstring& s, float x, float cy, float pitch, D2D1_COLOR_F c, int align, float a) {
+    std::wstring f = dotFold(s);
+    if (f.empty()) return 0;
+    wchar_t k[96]; swprintf(k, 96, L"|%.2f|%02x%02x%02x", pitch, (int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255));
+    std::wstring key = f + k;
+    auto it = dotCache.find(key);
+    if (it == dotCache.end()) {
+        if (dotCache.size() > 96) dotCacheClear();
+        DotImg im; int cols = dotCols(f);
+        im.w = cols * pitch;
+        D2D1_SIZE_F sz{std::max(1.f, im.w), 7 * pitch};
+        ID2D1BitmapRenderTarget* brt = nullptr;
+        if (SUCCEEDED(dcrt->CreateCompatibleRenderTarget(&sz, nullptr, nullptr, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, &brt))) {
+            brt->BeginDraw();
+            D2D1_COLOR_F clear{0, 0, 0, 0}; brt->Clear(&clear);
+            D2D1_COLOR_F cc{c.r, c.g, c.b, 1}; br->SetColor(&cc);
+            float rr = pitch * 0.4f; int cx = 0;
+            for (wchar_t ch : f) {
+                if (ch == L' ') { cx += 3; continue; }
+                const DotGlyph* g = dotGlyph(ch); if (!g) g = dotGlyph(L'?');
+                int gw = (int)strlen(g->r[0]);
+                for (int gx = 0; gx < gw; gx++)
+                    for (int gy = 0; gy < 7; gy++)
+                        if (g->r[gy][gx] == '#') { D2D1_ELLIPSE e{{(cx + gx + 0.5f) * pitch, (gy + 0.5f) * pitch}, rr, rr}; brt->FillEllipse(&e, br); }
+                cx += gw + 1;
+            }
+            brt->EndDraw();
+            brt->GetBitmap(&im.bmp);
+            brt->Release();
+        }
+        it = dotCache.emplace(key, im).first;
+    }
+    const DotImg& im = it->second;
+    float x0 = align == 1 ? x - im.w / 2 : align == 2 ? x - im.w : x;
+    if (im.bmp) {
+        D2D1_RECT_F d{x0, cy - 3.5f * pitch, x0 + im.w, cy + 3.5f * pitch};
+        rt->DrawBitmap(im.bmp, &d, clampf(c.a * a * gA, 0, 1), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+    }
+    return im.w;
+}
+// con música, el wifi va justo detrás de la hora en puntitos (carátula 6..28, hora desde 36)
+static float musicStatusX(const std::wstring& tm) { return 36 + dotWidth(tm, 2.0f) + 12; }
+static std::wstring hhmmNow() { SYSTEMTIME st; GetLocalTime(&st); return hhmm(st.wHour * 60 + st.wMinute); }
 static void drawCollapsed(float px, float py, float pw, int mode) {
     SYSTEMTIME st; GetLocalTime(&st);
     std::wstring tm = hhmm(st.wHour * 60 + st.wMinute);
@@ -2690,7 +2756,7 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         colC(GREEN); fillRR(rx + 2, cy - 4.5f, 21 * clampf(fill, 0.05f, 1), 9, 2);
         colC(GREEN); textN(std::to_wstring((int)lroundf(fill * 100)) + L" %", fTime, rx - 8 - 70, cy - 10, 70, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (mode == PM_TIMER) {
-        col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
+        dotText(tm, px + 16, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
         ULONGLONG rem = tmRemaining();
         float a = tmState == 2 ? 0.5f : 1.f;
         float rx = px + pw - 16 - 8;
@@ -2698,19 +2764,19 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         drawStatusRight(rx - 14 - counterW(rem >= 3600000) - 16, cy);
         float ga = gA; gA *= a;
         ring(rx, cy, 7.5f, tmDur ? (float)rem / tmDur : 0, timerColor(), 2.4f);
-        colC(timerColor()); textN(fmtClock(rem, true), fTime, rx - 14 - 80, cy - 10, 80, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        dotText(fmtClock(rem, true), rx - 14, cy, 2.0f, timerColor(), 2);
         gA = ga;
     } else if (mode == PM_SW) {
-        col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
+        dotText(tm, px + 16, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
         ULONGLONG el = swElapsed();
         drawStatusLeft(px + 78, cy);
         drawStatusRight(px + pw - 16 - 20 - counterW(el >= 3600000) - 16, cy);
         colC(ORANGE); glyph(L"\uE916", fIcon, px + pw - 16 - 7, cy);
-        col(1, 1, 1, 0.9f); textN(fmtClock(el, false), fTime, px + pw - 16 - 20 - 80, cy - 10, 80, 20, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        dotText(fmtClock(el, false), px + pw - 16 - 20, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1}, 2, 0.9f);
     } else if (mode == PM_EVENT) {
         int mins = 0; const CalEvent* e = upcomingEvent(&mins);
         if (!e) return;
-        col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 50, 20);
+        dotText(tm, px + 16, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
         colC(e->color); circle(px + 72, cy, 3.5f);
         col(1, 1, 1, 0.8f); text(e->title, fSmall, px + 82, cy - 9, pw - 82 - 78, 18);
         std::wstring when = mins <= 0 ? L"ahora" : L"en " + std::to_wstring(mins) + L" min";
@@ -2719,10 +2785,11 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         float ax = px + 6;
         if (artSBmp) drawBitmapRounded(artSBmp, ax, cy - 11, 22, 6, 1);
         else { col(0.22f, 0.22f, 0.24f); fillRR(ax, cy - 11, 22, 22, 6); col(1, 1, 1, 0.7f); text(L"♪", fSmall, ax, cy - 11, 22, 22, DWRITE_TEXT_ALIGNMENT_CENTER); }
-        col(1, 1, 1); textN(tm, fTime, ax + 30, cy - 10, 46, 20);
+        dotText(tm, ax + 30, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
         float bx = px + pw - 14 - 19;
-        drawStatusLeft(px + 96, cy);
-        float rs = bx - 12, tx = px + 96 + statusLeftW() + 6, tr = rs - statusRightW() - 12;
+        float sl = musicStatusX(tm);
+        drawStatusLeft(px + sl, cy);
+        float rs = bx - 12, tx = px + sl + statusLeftW() + 6, tr = rs - statusRightW() - 12;
         drawStatusRight(rs, cy);
         drawMarquee(tx, cy, std::max(0.f, tr - tx));
         for (int i = 0; i < 4; i++) {
@@ -2735,7 +2802,7 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
             fillRR(bx + i * 5.2f, cy - hgt / 2, 3, hgt, 1.5f);
         }
     } else {
-        col(1, 1, 1); textN(tm, fTime, px + 16, cy - 10, 60, 20);
+        dotText(tm, px + 16, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
         // wifi y volumen, como en la barra de tareas
         drawStatusLeft(px + 78, cy);
         drawStatusRight(px + pw - 15, cy);
@@ -2755,8 +2822,8 @@ static void drawMusic(float x, float y, float w, float h, int idx) {
     float tx = ax + as + 14, tw_ = x + w - 16 - tx;
     if (has && !media.appId.empty()) addHit(ax, ay, as, as, H_MEDIA_APP);  // la carátula: abre la app donde suena
     if (has) {
-        col(1, 1, 1); text(media.title, fTitle, tx, ay + 14, tw_, 22);
-        col(1, 1, 1, 0.55f); text(media.artist.empty() ? media.app : media.artist, fBody, tx, ay + 40, tw_, 18);
+        drawMarquee(tx, ay + 26, tw_);  // título - artista en puntitos, como en la píldora
+        col(1, 1, 1, 0.45f); text(media.app, fSmall, tx, ay + 44, tw_, 18);
     } else {
         col(1, 1, 1, 0.9f); text(L"Nada sonando", fTitle, tx, ay + 20, tw_, 22);
         col(1, 1, 1, 0.45f); text(L"Pon música en cualquier app", fTiny, tx, ay + 44, tw_, 14);
@@ -2830,9 +2897,8 @@ static void drawCalendar(float x, float y, float w, float h, int idx) {
         float ox = -t * 30;
         SYSTEMTIME st; GetLocalTime(&st);
         float mx = x + ox;
-        colC(ACC()); text(MONL[calM - 1], fCalHead, mx + 16, y + 12, 120, 18);
-        float mw = textWidth(MONL[calM - 1], fCalHead);
-        col(1, 1, 1, 0.45f); text(std::to_wstring(calY), fCalHead, mx + 16 + mw + 5, y + 12, 50, 18);
+        float mw = dotText(MONL[calM - 1], mx + 16, y + 21, DOT_TITLE, ACC());
+        dotText(std::to_wstring(calY), mx + 16 + mw + 6, y + 21, DOT_TITLE, D2D1_COLOR_F{1, 1, 1, 1}, 0, 0.45f);
         addHit(mx + 10, y + 8, mw + 60, 26, H_CTITLE);
         float ay = y + 21;
         for (int i = 0; i < 2; i++) {
@@ -2888,7 +2954,7 @@ static void drawStats(float x, float y, float w, float h, int idx) {
         ring(cx, cy, 27, ft, tempColor(t), 5.5f);
         wchar_t b[16];
         if (t < 0) wcscpy(b, L"--"); else swprintf(b, 16, L"%d°", (int)lroundf(t));
-        col(1, 1, 1); textN(b, fRing, cx - 26, cy - 13, 52, 20, DWRITE_TEXT_ALIGNMENT_CENTER);
+        dotText(b, cx, cy - 3, 2.0f, D2D1_COLOR_F{1, 1, 1, 1}, 1);
         if (use >= 0) { swprintf(b, 16, L"%d%%", (int)lroundf(use)); col(1, 1, 1, 0.45f); textN(b, fTiny, cx - 26, cy + 5, 52, 12, DWRITE_TEXT_ALIGNMENT_CENTER); }
         col(1, 1, 1, 0.55f); text(lbl, fTiny, x, cy + 31, w, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
     };
@@ -3299,11 +3365,10 @@ static void drawPicker(float x, float cy, float w) {
             float yy = cy + sinf(ang) * (RH / 0.40f), sc = cosf(ang);  // como un cilindro que gira
             int val = ((i % PICK_N[c]) + PICK_N[c]) % PICK_N[c];
             float sel = clampf(1 - fabsf(d), 0, 1);
-            col(1, 1, 1, (0.32f + 0.68f * sel) * sc * sc);
             D2D1_MATRIX_3X2_F sy{1, 0, 0, sc, 0, yy - sc * yy};
             D2D1_MATRIX_3X2_F m = mmul(sy, base);
             rt->SetTransform(&m);
-            textN(std::to_wstring(val), fMid, cx - 26, yy - 13, 44, 26, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            dotText(std::to_wstring(val), cx + 16, yy, 2.4f, D2D1_COLOR_F{1, 1, 1, 1}, 2, (0.32f + 0.68f * sel) * sc * sc);
         }
         rt->SetTransform(&base);
         col(1, 1, 1, 0.9f); text(LBL[c], fSmall, cx + 21, cy - 9, 30, 18);
@@ -3314,7 +3379,7 @@ static void drawPicker(float x, float cy, float w) {
 static void drawTimer(float x, float y, float w, float h, int idx) {
     beginCard(idx, y); card(x, y, w, h);
     D2D1_COLOR_F tc = timerColor();
-    colC(tc); text(pomo ? L"Pomodoro" : L"Temporizador", fCalHead, x + 16, y + 12, 100, 18);
+    dotText(pomo ? L"Pomodoro" : L"Tiempo", x + 16, y + 21, DOT_TITLE, tc);
     static const wchar_t* MODES[] = {L"Normal", L"Pomodoro"};
     segmented(x + w - 14 - 120, y + 9, 120, 22, MODES, 2, pomo ? 1 : 0, 2, H_TM_MODE);
     float cx = x + w / 2, cy = y + 96;
@@ -3327,7 +3392,7 @@ static void drawTimer(float x, float y, float w, float h, int idx) {
         float R = 40 * (0.85f + 0.15f * showRing);
         ULONGLONG rem = tmRemaining();
         ring(cx, cy - 4, R, tmDur ? (float)rem / tmDur : 0, tc, 6);
-        col(1, 1, 1, tmState == 2 ? 0.6f : 1); textN(fmtClock(rem, true), fMid, cx - 40, cy - 19, 80, 26, DWRITE_TEXT_ALIGNMENT_CENTER);
+        dotText(fmtClock(rem, true), cx, cy - 6, rem >= 3600000 ? 2.0f : 2.4f, D2D1_COLOR_F{1, 1, 1, 1}, 1, tmState == 2 ? 0.6f : 1);
         const wchar_t* sub = pomo ? (pomoPhase == 0 ? L"Enfoque" : L"Descanso") : (tmState == 2 ? L"En pausa" : L"Quedan");
         col(1, 1, 1, 0.45f); text(sub, fTiny, cx - 44, cy + 6, 88, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (pomo) {  // pomodoros hechos en la tanda de 4
@@ -3376,7 +3441,7 @@ static void drawNextEvent(float x, float y, float w, float h, int idx) {
         if (e.day == t && (e.end >= 0 ? e.end <= now : e.start < now)) continue;
         ev[n++] = &e; if (n == 2) break;
     }
-    col(1, 1, 1, 0.5f); text(L"Próximo", fCalHead, x + 16, y + 12, 100, 18);
+    dotText(L"Próximo", x + 16, y + 21, DOT_TITLE, D2D1_COLOR_F{1, 1, 1, 1}, 0, 0.5f);
     if (!ev[0]) {
         col(1, 1, 1, 0.3f); glyph(L"", fGlyph, x + w / 2, y + 74, 44);
         col(1, 1, 1, 0.75f); text(L"Nada a la vista", fBody, x, y + 100, w, 18, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -3406,8 +3471,8 @@ static void drawNextEvent(float x, float y, float w, float h, int idx) {
     else if (mins >= 1440 && e.day - t >= 1) { lbl = L"Faltan"; big = e.day - t == 1 ? L"Mañana" : std::to_wstring(e.day - t) + L" días"; }
     else { lbl = L"Empieza en"; big = fmtDur(mins); }
     col(1, 1, 1, 0.45f); text(lbl, fTiny, x + 16, y + 106, w - 32, 14);
-    if (kind == 1) colC(RED); else col(1, 1, 1);
-    textN(big, fBig, x + 14, y + 118, w - 28, 40);
+    { float pz = 3.0f; while (pz > 1.8f && dotWidth(big, pz) > w - 30) pz -= 0.2f;
+      dotText(big, x + 16, y + 138, pz, kind == 1 ? RED : D2D1_COLOR_F{1, 1, 1, 1}); }
     if (ongoing && e.end > e.start) {
         float fr = clampf((float)(now - e.start) / (e.end - e.start), 0, 1);
         col(1, 1, 1, 0.12f); fillRR(x + 16, y + 160, w - 32, 4, 2);
@@ -3635,7 +3700,7 @@ static void drawLook(float x, float y, float w, float h, int idx) {
 static void drawShelf(float x, float y, float w, float h) {
     beginCard(0, y); card(x, y, w, h);
     float dh = tw(15, dropHover ? 1.f : 0.f, 16);
-    col(1, 1, 1, 0.5f); text(L"Bandeja", fCalHead, x + 16, y + 12, 80, 18);
+    dotText(L"Bandeja", x + 16, y + 21, DOT_TITLE, D2D1_COLOR_F{1, 1, 1, 1}, 0, 0.5f);
     if (!shelf.empty()) {
         col(1, 1, 1, 0.35f); textN(std::to_wstring(shelf.size()) + (shelf.size() == 1 ? L" archivo" : L" archivos"), fTiny, x + 76, y + 12, 120, 18);
         float bw = 76, bx = x + w - 14 - bw;
@@ -3773,7 +3838,7 @@ static void drawHeader(float ox, float oy) {
 static void drawTray(float x, float y, float w, float h) {
     beginCard(0, y); card(x, y, w, h);
     const wchar_t* ttl = L"Segundo plano";
-    col(1, 1, 1, 0.5f); text(ttl, fCalHead, x + 16, y + 12, 140, 18);
+    dotText(ttl, x + 16, y + 21, DOT_TITLE, D2D1_COLOR_F{1, 1, 1, 1}, 0, 0.5f);
     if (!trayList.empty()) {
         col(1, 1, 1, 0.35f); textN(std::to_wstring(trayList.size()) + (trayList.size() == 1 ? L" app" : L" apps"), fTiny, x + 16 + textWidth(ttl, fCalHead) + 8, y + 12, 120, 18);
         col(1, 1, 1, 0.3f); text(L"Clic derecho: menú de la app", fTiny, x + w - 14 - 240, y + 12, 240, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -3838,6 +3903,7 @@ static int wantTick() {
     if (expanded && view == 1 && swRun) return 50;
     if (expanded && view == 1 && tmState == 1) return 100;
     if (eqActive() || marqueeActive()) return MQ_STEP_MS;
+    if (expanded && view == 0 && media.playing && !media.title.empty()) return MQ_STEP_MS;  // la marquesina de la tarjeta de música
     if (tmState == 1 || swRun) return 250;
     return 0;
 }
@@ -4025,7 +4091,7 @@ static void collapsedTargets() {
     float left = 78 + statusLeftW() + 12;
     if (mode == PM_TIMER) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(tmRemaining() >= 3600000) + 38);
     else if (mode == PM_SW) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(swElapsed() >= 3600000) + 36);
-    else if (mode == PM_MUSIC) w = 96 + statusLeftW() + 6 + 170 + 12 + statusRightW() + 12 + 33;
+    else if (mode == PM_MUSIC) w = musicStatusX(hhmmNow()) + statusLeftW() + 6 + 170 + 12 + statusRightW() + 12 + 33;
     if (hovered) { w += 10; h += 3; }
     sw.t = w; sh.t = h; sr.t = h / 2;
 }
@@ -5113,7 +5179,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (alertOn && n - alertAt > (alertPomo ? 6000u : 30000u)) dismissAlert();
             // solo redibujar si cambia lo que se ve (el segundo del contador)
             static ULONGLONG lastShown = ~0ull;
-            bool cont = alertOn || eqActive() || marqueeActive() || (expanded && view == 1 && (swRun || tmState == 1));
+            bool cont = alertOn || eqActive() || marqueeActive() || (expanded && view == 0 && media.playing) || (expanded && view == 1 && (swRun || tmState == 1));
             ULONGLONG shown = (tmRemaining() + 999) / 1000 * 100003 + swElapsed() / 1000 + (expanded ? 7 : 0);
             if (!animating && (cont || shown != lastShown)) { lastShown = shown; render(); }
         } else if (wp == T_CLOCK) { scheduleClock(); if (!expanded) collapsedTargets(); if (!animating) render(); }

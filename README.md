@@ -32,7 +32,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 - Cuando la ventana que estás usando lo tapa (por ejemplo, maximizada) se esconde hacia abajo; para sacarlo, lleva el ratón al borde de abajo. En pantalla completa desaparece.
 - Las apps que entran y salen lo hacen animadas, y el dock solo se dibuja cuando algo cambia: en reposo no gasta nada.
 
-**Al hacer clic** en la isla se abre un panel con tres pestañas:
+**Al hacer clic** en la isla se abre un panel con tres pestañas. La hora, la fecha, los títulos y los números grandes van en letras de puntitos, a juego con la marquesina de la música (cada texto se dibuja una vez y se reutiliza, así que no gasta más):
 
 - **Inicio**
   - Música de cualquier app (Spotify, YouTube en el navegador, el reproductor de Windows...) con anterior, pausa y siguiente. Un clic en la carátula abre la app donde está sonando (en el navegador, la ventana de la canción).

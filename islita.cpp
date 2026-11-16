@@ -2817,7 +2817,7 @@ static void drawSearch(float x, float y, float w, float h) {
 // ---------------------------------------------------------------- menú de clic derecho de una app del dock (como el de la barra de tareas)
 // Los menús del dock se abren hacia arriba desde el icono, dentro de la propia ventana del dock.
 enum { CA_NEW, CA_PIN, CA_UNPIN, CA_CLOSE };
-static int ctxTile = -1; static D2D1_RECT_F ctxAnchor{}; static std::vector<int> ctxActs;
+static int ctxTile = -1; static D2D1_RECT_F ctxAnchor{}; static std::vector<int> ctxActs; static float ctxTopY = 0;  // arriba del menú (coordenadas del dock)
 static const float CTX_W = 212, CTX_RH = 30, CTX_HD = 30, CTX_P = 5;
 static std::wstring tileLaunchTarget(const Tile& t, std::wstring* args) {
     if (t.pin >= 0) { if (args) *args = apps[t.pin].args; return apps[t.pin].target; }
@@ -2851,6 +2851,7 @@ static void drawCtx(float dW, float barTop) {
     const Tile& t = tiles[ctxTile];
     float acx = (ctxAnchor.left + ctxAnchor.right) / 2;
     float x = std::clamp(acx - CTX_W / 2, 8.f, dW - 8 - CTX_W), y = barTop - 12 - h;
+    ctxTopY = y;
     float a = easeOut(tw(20, 1.f, 20)), ga = gA; gA = ga * a;
     D2D1_MATRIX_3X2_F base; popupBegin(acx, y + h + 8, a, 0.9f, base);  // crece desde el icono
     popupCard(x, y, CTX_W, h, 12);
@@ -2897,10 +2898,37 @@ static void ctxRun(int item) {
 static HWND prevWnd = nullptr;
 static std::vector<HWND> prevSrcs; static std::vector<HTHUMBNAIL> prevThumbs; static std::vector<RECT> prevSlots; static std::vector<std::wstring> prevTitles;
 static std::vector<HWND> prevPending; static ULONGLONG prevPendingAt = 0;
+static bool prevClickable = false; static int prevHot = -1;  // con el menú de clic derecho: se elige una ventana pulsándola
+static void dockClosePopups(bool restoreFocus);
+static int prevSlotAt(LPARAM lp) {
+    POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
+    for (size_t i = 0; i < prevSlots.size(); i++) {
+        RECT r = prevSlots[i]; InflateRect(&r, (int)(6 * scale), (int)(24 * scale));
+        if (PtInRect(&r, pt)) return (int)i;
+    }
+    return -1;
+}
 static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-    case WM_NCHITTEST: return HTTRANSPARENT;
+    case WM_NCHITTEST: return prevClickable ? HTCLIENT : HTTRANSPARENT;
+    case WM_SETCURSOR: SetCursor(LoadCursor(nullptr, prevHot >= 0 ? IDC_HAND : IDC_ARROW)); return TRUE;
+    case WM_MOUSEMOVE: {
+        int i = prevSlotAt(lp);
+        if (i != prevHot) { prevHot = i; InvalidateRect(h, nullptr, FALSE); }
+        TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0}; TrackMouseEvent(&t);
+        return 0;
+    }
+    case WM_MOUSELEAVE: if (prevHot >= 0) { prevHot = -1; InvalidateRect(h, nullptr, FALSE); } return 0;
+    case WM_LBUTTONUP: {
+        int i = prevSlotAt(lp);
+        if (i >= 0 && i < (int)prevSrcs.size()) {
+            HWND w = prevSrcs[i];
+            dockClosePopups(false);
+            if (IsWindow(w)) forceForeground(w);
+        }
+        return 0;
+    }
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); RECT r; GetClientRect(h, &r);
@@ -2910,6 +2938,14 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         HGDIOBJ o = SelectObject(dc, f);
         for (size_t i = 0; i < prevSrcs.size() && i < prevSlots.size(); i++) {
             const RECT& sl = prevSlots[i];
+            if ((int)i == prevHot) {  // la que tiene el ratón: recuadro del color de acento
+                D2D1_COLOR_F a = ACC();
+                HBRUSH hb = CreateSolidBrush(RGB((int)(a.r * 255), (int)(a.g * 255), (int)(a.b * 255)));
+                int g = (int)(4 * scale); RECT fr{sl.left - g, sl.top - g, sl.right + g, sl.bottom + g};
+                HRGN outer = CreateRoundRectRgn(fr.left, fr.top, fr.right + 1, fr.bottom + 1, 8, 8), inner = CreateRectRgn(sl.left - 1, sl.top - 1, sl.right + 1, sl.bottom + 1);
+                CombineRgn(outer, outer, inner, RGN_DIFF); FillRgn(dc, outer, hb);
+                DeleteObject(outer); DeleteObject(inner); DeleteObject(hb);
+            }
             if (i < prevTitles.size() && !prevTitles[i].empty()) {  // título encima de cada miniatura
                 SetTextColor(dc, RGB(225, 225, 230));
                 RECT tr{sl.left, sl.top - (int)(20 * scale), sl.right, sl.top - (int)(4 * scale)};
@@ -2935,6 +2971,7 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 static void hidePreview() {
+    prevHot = -1;
     for (HTHUMBNAIL t : prevThumbs) if (t) DwmUnregisterThumbnail(t);
     prevThumbs.clear(); prevSrcs.clear(); prevSlots.clear(); prevTitles.clear();
     if (prevWnd) ShowWindow(prevWnd, SW_HIDE);
@@ -4325,12 +4362,14 @@ static bool dockStepIn(float dt) {
     }
     return busy;
 }
+static void dockPreviewUpdate();
 static void dockFrame() {
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     float dt = clampf((float)(now.QuadPart - dLast.QuadPart) / qpf.QuadPart, 0.001f, 1 / 30.f);
     dLast = now;
     bool busy;
-    { DockCtx c; busy = dockStepIn(dt); dockRenderIn(); }
+    { DockCtx c; busy = dockStepIn(dt); dockRenderIn(); if (tweensActive()) busy = true; }  // el dibujo puede haber puesto animaciones nuevas (menú, carpeta)
+    if (ctxTile >= 0) dockPreviewUpdate();  // miniaturas encima del menú en cuanto acaba de abrirse
     if (!busy) { dAnim = false; if (!animating && !expanded) setEco(true); }
 }
 static void dockStartBounce(int i, int kind) {
@@ -4343,32 +4382,33 @@ static void dockStartBounce(int i, int kind) {
 
 // --- vista previa de las ventanas de la app con el ratón (o de la fila de la carpeta)
 static void dockPreviewUpdate() {
-    std::vector<HWND> want; std::vector<std::wstring> titles; int cx = 0, edge = 0;
+    std::vector<HWND> want; std::vector<std::wstring> titles; int cx = 0, edge = 0; bool clickable = false;
     {
         DockCtx c;
-        if (dOn && dShown && dHideS.x < 0.05f && ctxTile < 0) {
-            if (fldTile >= 0) {
-                if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 20) > 0.98f) {
-                    int i = fldScroll + hoverId - H_FOLD;
-                    if (i < (int)fldWins.size())
-                        for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); cx = dWinX + (int)((ht.r.left + ht.r.right) / 2 * scale); edge = dWinY + (int)(dFolderTop * scale); break; }
-                }
-            } else if (hoverId >= D_ITEM && hoverId - D_ITEM < (int)dItems.size()) {
-                auto& it = dItems[hoverId - D_ITEM];
-                if (!it.leaving && it.tile >= 0 && tiles[it.tile].run >= 0) {
-                    const Tile& t = tiles[it.tile];
+        if (dOn && dShown && dHideS.x < 0.05f) {
+            if (ctxTile >= 0 && ctxTile < (int)tiles.size()) {
+                const Tile& t = tiles[ctxTile];
+                if (t.run >= 0 && tw(20, 1.f, 20) > 0.98f) {
                     want = running[t.run].wins;
                     std::stable_sort(want.begin(), want.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
                     if (want.size() > 8) want.resize(8);
                     std::wstring app = tileName(t);
                     for (HWND w : want) { std::wstring tt = folderTitle(w, app); titles.push_back(tt.empty() ? app : tt); }
-                    cx = dWinX + (int)(it.cx * scale); edge = dWinY + (int)((dLabelTop - 2) * scale);
+                    cx = dWinX + (int)((ctxAnchor.left + ctxAnchor.right) / 2 * scale); edge = dWinY + (int)((ctxTopY - 4) * scale);
+                    clickable = true;
+                }
+            } else if (fldTile >= 0) {
+                if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 20) > 0.98f) {
+                    int i = fldScroll + hoverId - H_FOLD;
+                    if (i < (int)fldWins.size())
+                        for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); cx = dWinX + (int)((ht.r.left + ht.r.right) / 2 * scale); edge = dWinY + (int)(dFolderTop * scale); break; }
                 }
             }
         }
     }
     if (want.empty()) { prevPending.clear(); KillTimer(dockHwnd, DT_PREVIEW); if (!prevSrcs.empty()) hidePreview(); return; }
-    if (!prevSrcs.empty()) { showPreview(want, titles, cx, edge); return; }  // ya había una: cambia al momento
+    prevClickable = clickable;
+    if (clickable || !prevSrcs.empty()) { showPreview(want, titles, cx, edge); return; }  // menú abierto o ya había una: al momento
     // la primera espera un poco, para que no salte al pasar el ratón de largo
     ULONGLONG now = nowMs();
     if (want != prevPending) { prevPending = want; prevPendingAt = now; }
@@ -4378,7 +4418,7 @@ static void dockPreviewUpdate() {
 
 // --- clics
 static void dockClosePopups(bool restoreFocus) {
-    ctxTile = -1; closeFolder(restoreFocus);
+    ctxTile = -1; closeFolder(restoreFocus); hidePreview(); prevClickable = false;
     if (restoreFocus && GetForegroundWindow() == dockHwnd && dPrevFg && IsWindow(dPrevFg)) SetForegroundWindow(dPrevFg);
     dPrevFg = nullptr;
     if (dPendingRefresh) dockRefresh();

@@ -3170,9 +3170,17 @@ static void ctxRun(int item) {
 static HWND prevWnd = nullptr;
 static std::vector<HWND> prevSrcs; static std::vector<HTHUMBNAIL> prevThumbs; static std::vector<RECT> prevSlots; static std::vector<std::wstring> prevTitles;
 static std::vector<HWND> prevPending; static ULONGLONG prevPendingAt = 0;
-static bool prevClickable = false, prevMouseIn = false; static int prevHot = -1;  // se elige una ventana pulsando su miniatura
+static bool prevClickable = false, prevMouseIn = false, prevHotX = false; static int prevHot = -1;  // se elige una ventana pulsando su miniatura; la X la cierra
+static int prevCx = 0, prevEdge = 0;  // dónde se colocó la última vista previa (para rehacerla al cerrar una)
+static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::wstring>& titles, int cx, int edge);
+static void dockRefreshSoon(UINT ms); static void dockUpdateShown(); static void hidePreview();
 static const UINT DT_PREVHIDE = 5;  // temporizador del dock: quitar las miniaturas tras un margen (para que dé tiempo a llegar a ellas)
 static void dockClosePopups(bool restoreFocus);
+// la X de cerrar: arriba a la derecha de la miniatura, en la fila del título
+static RECT prevCloseRect(const RECT& sl) {
+    int z = (int)(18 * scale), m = (int)(1 * scale);
+    return RECT{sl.right - z - m, sl.top - z - (int)(3 * scale), sl.right - m, sl.top - (int)(3 * scale)};
+}
 static int prevSlotAt(LPARAM lp) {
     POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
     for (size_t i = 0; i < prevSlots.size(); i++) {
@@ -3189,19 +3197,31 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         if (!prevMouseIn) { prevMouseIn = true; if (dockHwnd) KillTimer(dockHwnd, DT_PREVHIDE); }
         int i = prevSlotAt(lp);
-        if (i != prevHot) { prevHot = i; InvalidateRect(h, nullptr, FALSE); }
+        bool onX = false;
+        if (i >= 0) { RECT xr = prevCloseRect(prevSlots[i]); InflateRect(&xr, (int)(3 * scale), (int)(3 * scale)); POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)}; onX = PtInRect(&xr, pt) != 0; }
+        if (i != prevHot || onX != prevHotX) { prevHot = i; prevHotX = onX; InvalidateRect(h, nullptr, FALSE); }
         TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0}; TrackMouseEvent(&t);
         return 0;
     }
     case WM_MOUSELEAVE:
         prevMouseIn = false;
-        if (prevHot >= 0) { prevHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (prevHot >= 0) { prevHot = -1; prevHotX = false; InvalidateRect(h, nullptr, FALSE); }
         if (dockHwnd) SetTimer(dockHwnd, DT_PREVHIDE, 350, nullptr);
         return 0;
     case WM_LBUTTONUP: {
         int i = prevSlotAt(lp);
         if (i >= 0 && i < (int)prevSrcs.size()) {
             HWND w = prevSrcs[i];
+            if (prevHotX && i == prevHot) {  // la X: cierra esa ventana y deja las demás a la vista
+                PostMessage(w, WM_SYSCOMMAND, SC_CLOSE, 0);
+                std::vector<HWND> rest; std::vector<std::wstring> tt;
+                for (size_t k = 0; k < prevSrcs.size(); k++) if ((int)k != i) { rest.push_back(prevSrcs[k]); if (k < prevTitles.size()) tt.push_back(prevTitles[k]); }
+                prevHot = -1; prevHotX = false;
+                if (rest.empty()) { hidePreview(); dockUpdateShown(); }
+                else { showPreview(rest, tt, prevCx, prevEdge); prevMouseIn = true; }
+                dockRefreshSoon(400);
+                return 0;
+            }
             dockClosePopups(false);
             if (IsWindow(w)) forceForeground(w);
         }
@@ -3223,9 +3243,22 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 CombineRgn(outer, outer, inner, RGN_DIFF); FillRgn(dc, outer, hb);
                 DeleteObject(outer); DeleteObject(inner); DeleteObject(hb);
             }
+            if ((int)i == prevHot && prevClickable) {  // X para cerrarla (roja con el ratón encima)
+                RECT xr = prevCloseRect(sl);
+                HBRUSH xb = CreateSolidBrush(prevHotX ? RGB(232, 17, 35) : RGB(70, 70, 76));
+                HGDIOBJ ob = SelectObject(dc, xb), op = SelectObject(dc, GetStockObject(NULL_PEN));
+                Ellipse(dc, xr.left, xr.top, xr.right + 1, xr.bottom + 1);
+                SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(xb);
+                int c = (xr.left + xr.right) / 2, cy2 = (xr.top + xr.bottom) / 2, k = (int)(4 * scale);
+                HPEN pn = CreatePen(PS_SOLID, std::max(1, (int)lroundf(1.6f * scale)), RGB(255, 255, 255));
+                HGDIOBJ opn = SelectObject(dc, pn);
+                MoveToEx(dc, c - k, cy2 - k, nullptr); LineTo(dc, c + k + 1, cy2 + k + 1);
+                MoveToEx(dc, c + k, cy2 - k, nullptr); LineTo(dc, c - k - 1, cy2 + k + 1);
+                SelectObject(dc, opn); DeleteObject(pn);
+            }
             if (i < prevTitles.size() && !prevTitles[i].empty()) {  // título encima de cada miniatura
                 SetTextColor(dc, RGB(225, 225, 230));
-                RECT tr{sl.left, sl.top - (int)(20 * scale), sl.right, sl.top - (int)(4 * scale)};
+                RECT tr{sl.left, sl.top - (int)(20 * scale), sl.right - (int)(24 * scale), sl.top - (int)(4 * scale)};
                 DrawTextW(dc, prevTitles[i].c_str(), -1, &tr, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
             if (!prevThumbs[i]) {  // minimizada: Windows no la dibuja, así que va su icono
@@ -3300,7 +3333,7 @@ static void showPreview(const std::vector<HWND>& srcs, const std::vector<std::ws
         }
         x += sz[i].cx + gap;
     }
-    prevSrcs = srcs; prevTitles = titles;
+    prevSrcs = srcs; prevTitles = titles; prevCx = cx; prevEdge = edge;
     int wh = 2 * pad + titleH + rowH;
     int wx = std::clamp(cx - totW / 2, (int)mon.left + 8, (int)mon.right - 8 - totW);
     SetWindowPos(prevWnd, HWND_TOPMOST, wx, edge - (int)(8 * scale) - wh, totW, wh, SWP_NOACTIVATE | SWP_SHOWWINDOW);

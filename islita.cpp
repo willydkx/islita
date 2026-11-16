@@ -2143,8 +2143,16 @@ static int pillMode() {
 }
 static std::wstring hhmm(int m) { wchar_t b[8]; swprintf(b, 8, L"%02d:%02d", m / 60, m % 60); return b; }
 
+static SYSTEM_POWER_STATUS psCache{}; static bool psOk = false; static ULONGLONG psAt = 0;
+// estado de la batería guardado un segundo: con música la píldora se dibuja muchas veces por segundo
+static const SYSTEM_POWER_STATUS& powerStatus(bool* ok = nullptr) {
+    ULONGLONG n = GetTickCount64();
+    if (!psAt || n - psAt >= 1000) { psOk = GetSystemPowerStatus(&psCache) != 0; psAt = n; }
+    if (ok) *ok = psOk;
+    return psCache;
+}
 static void drawBattery(float x, float cy) {
-    SYSTEM_POWER_STATUS ps; if (!GetSystemPowerStatus(&ps) || ps.BatteryFlag == 128 || ps.BatteryFlag == 255 || ps.BatteryLifePercent > 100) return;
+    bool ok; SYSTEM_POWER_STATUS ps = powerStatus(&ok); if (!ok || ps.BatteryFlag == 128 || ps.BatteryFlag == 255 || ps.BatteryLifePercent > 100) return;
     float pct = ps.BatteryLifePercent / 100.f; bool chg = ps.ACLineStatus == 1;
     std::wstring num = std::to_wstring(ps.BatteryLifePercent);
     col(1, 1, 1, 0.9f); textN(num, fSmall, x - 34, cy - 9, 30, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -2425,8 +2433,8 @@ static int volIcon() {  // 0 sin dispositivo, 1 silencio, 2..5 nivel
     return v <= 0.001f ? 2 : v < 0.34f ? 3 : v < 0.67f ? 4 : 5;
 }
 
-static bool onAC() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.ACLineStatus == 1; }
-static bool hasBattery() { SYSTEM_POWER_STATUS ps; return GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100; }
+static bool onAC() { bool ok; auto& ps = powerStatus(&ok); return ok && ps.ACLineStatus == 1; }
+static bool hasBattery() { bool ok; auto& ps = powerStatus(&ok); return ok && ps.BatteryFlag != 128 && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100; }
 
 // ---- estado (wifi, volumen, bandeja, día, batería): lo enseña la píldora en todos los modos normales
 static std::wstring shortDate() {
@@ -2437,7 +2445,12 @@ static float batteryW() { return cfg.battery && hasBattery() ? 24 + 40 + (onAC()
 // ancho de la parte izquierda a partir del centro del icono del wifi
 static float statusLeftW() { return shelf.empty() ? 34.f : 64.f; }
 // ancho de la parte derecha (día + batería + cafeína)
-static float statusRightW() { return batteryW() + textWidth(shortDate(), fSmall) + (caffeine ? 22.f : 0.f); }
+static float dateW(const std::wstring& d) {
+    static std::wstring last; static float w = 0;
+    if (d != last) { last = d; w = textWidth(d, fSmall); }
+    return w;
+}
+static float statusRightW() { return batteryW() + dateW(shortDate()) + (caffeine ? 22.f : 0.f); }
 // wifi, volumen y bandeja; x = centro del icono del wifi
 static void drawStatusLeft(float x, float cy) {
     if (netKind == 1) {
@@ -2455,7 +2468,7 @@ static void drawStatusLeft(float x, float cy) {
 static void drawStatusRight(float right, float cy) {
     std::wstring d = shortDate();
     if (cfg.battery && hasBattery()) { drawBattery(right - 24, cy); right -= batteryW(); }
-    float dwid = textWidth(d, fSmall);
+    float dwid = dateW(d);
     col(1, 1, 1, 0.55f); text(d, fSmall, right - 90, cy - 9, 90, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
     if (caffeine) { colC(ACC()); glyph(L"", fIcon, right - dwid - 14, cy); }
 }
@@ -4572,6 +4585,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (expanded && !animating) render();
         return 0;
     case WM_POWERBROADCAST:
+        psAt = 0;  // ha cambiado algo de la batería: se vuelve a consultar
         if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) { scheduleClock(); SetEvent(gWake); }
         {   // cargador enchufado: rayo en la píldora
             SYSTEM_POWER_STATUS ps;

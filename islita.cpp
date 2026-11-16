@@ -2753,7 +2753,7 @@ static void drawMusic(float x, float y, float w, float h, int idx) {
         col(1, 1, 1, 0.35f); text(L"\uE8D6", fGlyph, ax, ay, as, as, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
     float tx = ax + as + 14, tw_ = x + w - 16 - tx;
-    if (has && !media.appId.empty()) addHit(ax, ay, x + w - 16 - ax, as, H_MEDIA_APP);  // carátula y título: abre la app
+    if (has && !media.appId.empty()) addHit(ax, ay, as, as, H_MEDIA_APP);  // la carátula: abre la app donde suena
     if (has) {
         col(1, 1, 1); text(media.title, fTitle, tx, ay + 14, tw_, 22);
         col(1, 1, 1, 0.55f); text(media.artist.empty() ? media.app : media.artist, fBody, tx, ay + 40, tw_, 18);
@@ -4975,12 +4975,6 @@ static void openMediaApp() {
     std::wstring path = exePathOfRunning(exeName);
     ShellExecuteW(nullptr, L"open", path.empty() ? exeName.c_str() : path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
-// zona de la música en la píldora (carátula y título): x en coordenadas de la píldora
-static bool pillMusicHit(float x) {
-    if (pillMode() != PM_MUSIC || media.appId.empty() || sh.x < CH - 1) return false;  // en la rayita, el clic abre la isla
-    float pw = sw.x, tx = 96 + statusLeftW() + 6, tr = pw - 14 - 19 - 12 - statusRightW() - 12;
-    return x < 32 || (x >= tx - 4 && x <= tr + 4);
-}
 static void openFromPill() {
     if (alertOn) { dismissAlert(); setExpanded(true, lastTab); return; }
     int mode = pillMode();
@@ -5188,7 +5182,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (dragKind) { dragEnd(lp); pressId = H_NONE; render(); return 0; }
         int id = expanded ? hitAt(lp) : H_NONE, was = pressId;
         pressId = H_NONE;
-        if (!expanded) { if (pillMusicHit((short)LOWORD(lp) / scale - M)) openMediaApp(); else openFromPill(); }
+        if (!expanded) openFromPill();
         else if (id && id == was) click(id);
         else if (!animating) render();
         return 0;

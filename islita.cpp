@@ -2501,7 +2501,7 @@ static const DotGlyph DOTS[] = {
     {L'A', {".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
     {L'B', {"####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."}},
     {L'C', {".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."}},
-    {L'D', {"####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."}},
+    {L'D', {"###..", "#..#.", "#...#", "#...#", "#...#", "#..#.", "###.."}},
     {L'E', {"#####", "#....", "#....", "####.", "#....", "#....", "#####"}},
     {L'F', {"#####", "#....", "#....", "####.", "#....", "#....", "#...."}},
     {L'G', {".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"}},
@@ -2582,7 +2582,7 @@ static std::wstring dotFold(const std::wstring& s) {
 // Se dibuja una vez por canción en una imagen y luego solo se desplaza (va con el mismo ritmo del ecualizador).
 static ID2D1BitmapRenderTarget* mqRT = nullptr; static std::wstring mqKey; static float mqW = 0; static bool mqDots = true;
 static ULONGLONG mqMs = 0, mqLast = 0, mqChangedAt = 0;
-static const float DOT_P = 2.4f, DOT_R = 0.92f; static const int MQ_STEP_MS = 70;
+static const float DOT_P = 2.6f, DOT_R = 1.05f; static const int MQ_STEP_MS = 70;
 static void freeMarquee() { SafeRelease(mqRT); mqKey.clear(); }
 static bool buildMarquee(const std::wstring& title, const std::wstring& artist) {
     std::wstring key = title + L"\x1f" + artist;
@@ -3110,9 +3110,8 @@ static LRESULT CALLBACK prevProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         HGDIOBJ o = SelectObject(dc, f);
         for (size_t i = 0; i < prevSrcs.size() && i < prevSlots.size(); i++) {
             const RECT& sl = prevSlots[i];
-            if ((int)i == prevHot) {  // la que tiene el ratón: recuadro del color de acento
-                D2D1_COLOR_F a = ACC();
-                HBRUSH hb = CreateSolidBrush(RGB((int)(a.r * 255), (int)(a.g * 255), (int)(a.b * 255)));
+            if ((int)i == prevHot) {  // la que tiene el ratón: recuadro blanco
+                HBRUSH hb = CreateSolidBrush(RGB(255, 255, 255));
                 int g = (int)(4 * scale); RECT fr{sl.left - g, sl.top - g, sl.right + g, sl.bottom + g};
                 HRGN outer = CreateRoundRectRgn(fr.left, fr.top, fr.right + 1, fr.bottom + 1, 8, 8), inner = CreateRectRgn(sl.left - 1, sl.top - 1, sl.right + 1, sl.bottom + 1);
                 CombineRgn(outer, outer, inner, RGN_DIFF); FillRgn(dc, outer, hb);
@@ -4549,7 +4548,6 @@ static void dockFrame() {
     dLast = now;
     bool busy;
     { DockCtx c; busy = dockStepIn(dt); dockRenderIn(); if (tweensActive()) busy = true; }  // el dibujo puede haber puesto animaciones nuevas (menú, carpeta)
-    if (ctxTile >= 0) dockPreviewUpdate(false);  // miniaturas encima del menú en cuanto acaba de abrirse
     if (!busy) { dAnim = false; if (!animating && !expanded) setEco(true); }
 }
 static void dockStartBounce(int i, int kind) {
@@ -4566,23 +4564,8 @@ static void dockPreviewUpdate(bool fromTimer) {
     {
         DockCtx c;
         if (dOn && dShown && dHideS.x < 0.05f) {
-            if (ctxTile >= 0 && ctxTile < (int)tiles.size()) {
-                const Tile& t = tiles[ctxTile];
-                if (t.run >= 0 && tw(20, 1.f, 20) > 0.98f) {
-                    want = running[t.run].wins;
-                    std::stable_sort(want.begin(), want.end(), [](HWND a, HWND b) { return winSeq[a] < winSeq[b]; });
-                    if (want.size() > 8) want.resize(8);
-                    std::wstring app = tileName(t);
-                    for (HWND w : want) { std::wstring tt = folderTitle(w, app); titles.push_back(tt.empty() ? app : tt); }
-                    cx = dWinX + (int)((ctxAnchor.left + ctxAnchor.right) / 2 * scale); edge = dWinY + (int)((ctxTopY - 4) * scale);
-                    clickable = true;
-                }
-            } else if (fldTile >= 0) {
-                if (hoverId >= H_FOLD && hoverId < H_FOLD + FLD_ROWS && tw(24, 1.f, 20) > 0.98f) {
-                    int i = fldScroll + hoverId - H_FOLD;
-                    if (i < (int)fldWins.size())
-                        for (auto& ht : hits) if (ht.id == hoverId) { want.push_back(fldWins[i]); cx = dWinX + (int)((ht.r.left + ht.r.right) / 2 * scale); edge = dWinY + (int)(dFolderTop * scale); break; }
-                }
+            if (dockPopup()) {
+                // con el menú de clic derecho o la carpeta abiertos, solo las opciones
             } else if (hoverId >= D_ITEM && hoverId - D_ITEM < (int)dItems.size()) {  // al pasar el ratón por una app abierta
                 auto& it = dItems[hoverId - D_ITEM];
                 if (!it.leaving && it.tile >= 0 && tiles[it.tile].run >= 0) {
@@ -4608,7 +4591,7 @@ static void dockPreviewUpdate(bool fromTimer) {
     }
     KillTimer(dockHwnd, DT_PREVHIDE);
     prevClickable = clickable;
-    if (ctxTile >= 0 || !prevSrcs.empty()) { showPreview(want, titles, cx, edge); return; }  // menú abierto o ya había una: al momento
+    if (!prevSrcs.empty()) { showPreview(want, titles, cx, edge); return; }  // ya había una: cambia al momento
     // la primera espera un poco, para que no salte al pasar el ratón de largo
     ULONGLONG now = nowMs();
     if (want != prevPending) { prevPending = want; prevPendingAt = now; }

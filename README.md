@@ -27,7 +27,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 - Primero tus apps fijadas y, tras una rayita, las demás que tengas abiertas. Las abiertas llevan un puntito debajo (uno por ventana, hasta tres; más claro en la que estás usando).
 - Al pasar el ratón los iconos se agrandan como una lupa y sale el nombre encima; al rato, sus ventanas en miniatura y en directo. Da tiempo a subir el ratón hasta ellas y pulsar la que quieras.
 - Clic en una abierta: va a su ventana (si ya estaba delante, se minimiza). Si tiene varias se abre una carpeta con sus ventanas numeradas: clic o el número en el teclado (Esc la cierra). Clic en una fijada cerrada: se abre y el icono va dando saltos hasta que sale su ventana. Botón de la rueda: otra ventana nueva.
-- Clic derecho: las miniaturas y un menú para abrir otra ventana, fijar o quitar del dock y cerrar.
+- Clic derecho: solo el menú, para abrir otra ventana, fijar o quitar del dock y cerrar.
 - Si una app pide atención (parpadea), su icono salta.
 - Cuando la ventana que estás usando lo tapa (por ejemplo, maximizada) se esconde hacia abajo; para sacarlo, lleva el ratón al borde de abajo. En pantalla completa desaparece.
 - Las apps que entran y salen lo hacen animadas, y el dock solo se dibuja cuando algo cambia: en reposo no gasta nada.

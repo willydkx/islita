@@ -17,6 +17,7 @@
 #include <dwrite.h>
 #include <wincodec.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <shlobj.h>
 #include <commctrl.h>
 #include <pdh.h>
@@ -61,7 +62,7 @@ enum { WM_APP_MEDIA = WM_APP + 1, WM_APP_STATS, WM_APP_CAL, WM_APP_APPS, WM_APP_
 enum { H_NONE = 0, H_PREV, H_PLAY, H_NEXT, H_CPREV, H_CNEXT, H_CTITLE, H_CBACK, H_COPEN,
        H_TAB0 = 10, H_TAB1, H_GEAR, H_TM_PLAY, H_TM_RESET, H_TM_ADD, H_SW_L, H_SW_R, H_VOL, H_EDIT_CAL, H_EDIT_APPS, H_QUIT, H_TM_SKIP, H_BRI, H_CLAUDE, H_NEXTEV, H_SHELF_CLEAR, H_TRAYBTN, H_DEV_BTN, H_DEV_BACK, H_NET_BTN, H_BT_BTN, H_NET_MORE, H_BT_MORE, H_NET_DISC, H_NET_TOG, H_BT_TOG,
        H_DAY = 100, H_APP = 200, H_EVT = 300, H_TM_PRE = 400, H_Q = 420, H_SET = 440, H_SEG_ALERT = 460, H_SEG_SIZE = 470, H_SEG_OPA = 475, H_ACC = 480, H_SEG_TMODE = 486, H_PICK = 490, H_TM_MODE = 495, H_TAB2 = 499, H_SHELF = 600, H_SHELF_DEL = 650,
-       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950, H_NET = 1000, H_BT = 1030, H_FOLD_BG = 1100, H_FOLD = 1101 };
+       H_WIN = 730, H_APP_ADD = 731, H_SRCH = 740, H_SRCH_RES = 750, H_SRCH_PIN = 760, H_APPS_CARD = 789, H_APP_PAGE = 790, H_CTX_BG = 800, H_CTX = 801, H_TRAY = 900, H_DEV = 950, H_NET = 1000, H_BT = 1030, H_FOLD_BG = 1100, H_FOLD = 1101, H_MEDIA_APP = 1200 };
 
 // ---------------------------------------------------------------- utilidades
 template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
@@ -70,7 +71,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b :
 // ---------------------------------------------------------------- estado compartido con el hilo de fondo
 struct MediaInfo {
     bool has = false, playing = false;
-    std::wstring title, artist, app;
+    std::wstring title, artist, app, appId;  // appId: identificador de la app que suena (para abrirla)
     std::vector<BYTE> art, artSmall; int artPx = 0, artSPx = 0;
     unsigned artVer = 0;
     D2D1_COLOR_F accent{1, 1, 1, 1};
@@ -231,7 +232,7 @@ static void pollMedia() {
         if (FAILED(hr)) { rel(mgr); }
         else if (ses) {
             mi.has = true;
-            HSTRING h = nullptr; ((FnHs)VT(ses)[6])(ses, &h); mi.app = prettyApp(hs(h));
+            HSTRING h = nullptr; ((FnHs)VT(ses)[6])(ses, &h); mi.appId = hs(h); mi.app = prettyApp(mi.appId);
             void* pi = nullptr;
             if (SUCCEEDED(((FnObj)VT(ses)[9])(ses, &pi)) && pi) {  // GetPlaybackInfo
                 int s = 0; ((FnInt)VT(pi)[7])(pi, &s); mi.playing = (s == 4); rel(pi);
@@ -268,7 +269,7 @@ static void pollMedia() {
     }
     std::lock_guard<std::mutex> lk(gMx);
     MediaInfo& o = gMediaShared;
-    bool changed = artChanged || o.has != mi.has || o.playing != mi.playing || o.title != mi.title || o.artist != mi.artist || o.app != mi.app;
+    bool changed = artChanged || o.has != mi.has || o.playing != mi.playing || o.title != mi.title || o.artist != mi.artist || o.app != mi.app || o.appId != mi.appId;
     if (!changed) return;
     if (!artChanged) { mi.art.swap(o.art); mi.artSmall.swap(o.artSmall); mi.artPx = o.artPx; mi.artSPx = o.artSPx; mi.accent = o.accent; mi.artVer = o.artVer; }
     else mi.artVer = o.artVer + 1;
@@ -2752,6 +2753,7 @@ static void drawMusic(float x, float y, float w, float h, int idx) {
         col(1, 1, 1, 0.35f); text(L"\uE8D6", fGlyph, ax, ay, as, as, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
     float tx = ax + as + 14, tw_ = x + w - 16 - tx;
+    if (has && !media.appId.empty()) addHit(ax, ay, x + w - 16 - ax, as, H_MEDIA_APP);  // carátula y título: abre la app
     if (has) {
         col(1, 1, 1); text(media.title, fTitle, tx, ay + 14, tw_, 22);
         col(1, 1, 1, 0.55f); text(media.artist.empty() ? media.app : media.artist, fBody, tx, ay + 40, tw_, 18);
@@ -4816,11 +4818,13 @@ static void setCaffeine(bool on) {
 }
 static void applySize() { updateMonitor(); ensureDib(); }
 
+static void openMediaApp();
 static void click(int id) {
     if (id == H_TAB0 || id == H_TAB1) { view = lastTab = id - H_TAB0; }
     else if (id == H_TAB2) { view = lastTab = V_SHELF; }
     else if (id == H_GEAR) { view = view == V_SET ? lastTab : V_SET; }
     else if (id == H_NEXTEV) { openCalendarDay(nextY, nextM, nextD); return; }
+    else if (id == H_MEDIA_APP) { setExpanded(false); openMediaApp(); return; }
     else if (id == H_SHELF_CLEAR) { for (auto& it : shelf) SafeRelease(it.bmp); shelf.clear(); saveShelf(); }
     else if (id >= H_SHELF_DEL && id < H_SHELF_DEL + 30) shelfRemove(id - H_SHELF_DEL);
     else if (id >= H_SHELF && id < H_SHELF + 30) {
@@ -4934,6 +4938,48 @@ static void dragEnd(LPARAM lp) {
     }
     if (dragKind == 1) volPop();
     dragKind = 0;
+}
+
+// ---------------------------------------------------------------- abrir la app en la que suena la música
+// Va a su ventana (en el navegador, la que tenga la canción en el título); si no tiene ventana
+// (p. ej. Spotify escondido en la bandeja) la vuelve a abrir, que la saca.
+static std::wstring exePathOfRunning(const std::wstring& exeName) {
+    std::wstring r;
+    HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (sn == INVALID_HANDLE_VALUE) return r;
+    PROCESSENTRY32W pe{sizeof pe};
+    for (BOOL ok = Process32FirstW(sn, &pe); ok; ok = Process32NextW(sn, &pe))
+        if (!_wcsicmp(pe.szExeFile, exeName.c_str())) { r = exeOfPid(pe.th32ProcessID); if (!r.empty()) break; }
+    CloseHandle(sn); return r;
+}
+static void openMediaApp() {
+    std::wstring id = media.appId;
+    if (id.empty()) return;
+    bool packaged = id.find(L'!') != std::wstring::npos;
+    std::wstring exeName = packaged ? L"" : (endsWithI(id, L".exe") ? id : id + L".exe");
+    std::wstring idl = lowerW(id), tl = lowerW(media.title);
+    refreshRunning();
+    HWND best = nullptr;
+    for (auto& r : running) {
+        bool m = (!r.aumid.empty() && lowerW(r.aumid) == idl) || (!exeName.empty() && !_wcsicmp(PathFindFileNameW(r.exe.c_str()), exeName.c_str()));
+        if (!m || r.wins.empty()) continue;
+        for (HWND w : r.wins) {
+            wchar_t t[512]; int n = GetWindowTextW(w, t, 512);
+            if (!tl.empty() && n > 0 && lowerW(std::wstring(t, n)).find(tl) != std::wstring::npos) { best = w; break; }
+        }
+        if (!best) best = r.wins.front();
+        break;
+    }
+    if (best) { forceForeground(best); return; }
+    if (packaged) { ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + id).c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
+    std::wstring path = exePathOfRunning(exeName);
+    ShellExecuteW(nullptr, L"open", path.empty() ? exeName.c_str() : path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+// zona de la música en la píldora (carátula y título): x en coordenadas de la píldora
+static bool pillMusicHit(float x) {
+    if (pillMode() != PM_MUSIC || media.appId.empty() || sh.x < CH - 1) return false;  // en la rayita, el clic abre la isla
+    float pw = sw.x, tx = 96 + statusLeftW() + 6, tr = pw - 14 - 19 - 12 - statusRightW() - 12;
+    return x < 32 || (x >= tx - 4 && x <= tr + 4);
 }
 static void openFromPill() {
     if (alertOn) { dismissAlert(); setExpanded(true, lastTab); return; }
@@ -5142,7 +5188,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (dragKind) { dragEnd(lp); pressId = H_NONE; render(); return 0; }
         int id = expanded ? hitAt(lp) : H_NONE, was = pressId;
         pressId = H_NONE;
-        if (!expanded) openFromPill();
+        if (!expanded) { if (pillMusicHit((short)LOWORD(lp) / scale - M)) openMediaApp(); else openFromPill(); }
         else if (id && id == was) click(id);
         else if (!animating) render();
         return 0;
@@ -5255,7 +5301,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_APP_MEDIA: {
         { std::lock_guard<std::mutex> lk(gMx); media.has = gMediaShared.has; media.playing = gMediaShared.playing; media.title = gMediaShared.title;
-          media.artist = gMediaShared.artist; media.app = gMediaShared.app; media.accent = gMediaShared.accent;
+          media.artist = gMediaShared.artist; media.app = gMediaShared.app; media.appId = gMediaShared.appId; media.accent = gMediaShared.accent;
           if (gMediaShared.artVer != artVerUI) {
               artVerUI = gMediaShared.artVer; SafeRelease(artBmp); SafeRelease(artSBmp);
               D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));

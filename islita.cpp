@@ -5421,19 +5421,19 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
             }
             if (quit) break;
             if (animating || dAnim) {
-                LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+                static LARGE_INTEGER a{}; LARGE_INTEGER b;
+                // a ~60-75 fotogramas por segundo aunque la pantalla vaya a 120/144 Hz (la mitad de CPU), pero
+                // siempre a la misma distancia: se espera a cada refresco de la pantalla hasta que haya pasado
+                // el tiempo de un fotograma (antes a veces salían seguidos a 7 ms y luego a 16 ms: tirones)
+                QueryPerformanceCounter(&b);
+                double minMs = 1000.0 / 75 * 0.78, el = a.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / qpf.QuadPart : 1e9;
+                for (int guard = 0; el < minMs && guard < 4; guard++) {
+                    if (FAILED(DwmFlush())) { Sleep(8); break; }
+                    QueryPerformanceCounter(&b); el = (b.QuadPart - a.QuadPart) * 1000.0 / qpf.QuadPart;
+                }
+                QueryPerformanceCounter(&a);
                 if (animating) frame();
                 if (dAnim) dockFrame();
-                // a ~60-75 fotogramas por segundo aunque la pantalla vaya a 120/144 Hz: igual de fluido y la mitad de CPU
-                int& flushes = gFlushes;
-                if (!flushes) {
-                    DWM_TIMING_INFO ti{}; ti.cbSize = sizeof ti;
-                    double hz = SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &ti)) && ti.rateRefresh.uiDenominator ? (double)ti.rateRefresh.uiNumerator / ti.rateRefresh.uiDenominator : 60;
-                    flushes = std::max(1, (int)lround(hz / 75.0));
-                }
-                for (int i = 0; i < flushes; i++) if (FAILED(DwmFlush())) { Sleep(8); break; }
-                QueryPerformanceCounter(&b);
-                if ((b.QuadPart - a.QuadPart) * 1000 / qpf.QuadPart < 3) Sleep(4);
             }
         } else {
             BOOL r = GetMessageW(&m, nullptr, 0, 0);

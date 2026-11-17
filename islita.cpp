@@ -4839,9 +4839,10 @@ static void dockStartMenu() {
 }
 static void dockClick(int id) {  // fuera de DockCtx
     if (id >= H_CTX && id < H_CTX + 8) {
-        HWND back = dPrevFg; int item = id - H_CTX;
-        if (GetForegroundWindow() == dockHwnd && back && IsWindow(back)) SetForegroundWindow(back);
+        HWND back = dPrevFg; int item = id - H_CTX, tile = ctxTile;
+        if (GetForegroundWindow() == dockHwnd && back && IsWindow(back)) SetForegroundWindow(back);  // al perder el foco el menú se cierra (ctxTile = -1)
         dPrevFg = nullptr;
+        ctxTile = tile; ctxBuild();
         ctxRun(item);
         dockClosePopups(false);
         return;

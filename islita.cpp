@@ -2141,7 +2141,7 @@ static void roundBtn(float cx, float cy, float r, D2D1_COLOR_F tint, float bgA, 
 }
 
 // ---------------------------------------------------------------- píldora
-enum { PM_IDLE, PM_MUSIC, PM_EVENT, PM_ALERT, PM_TIMER, PM_SW, PM_CHARGE };
+enum { PM_IDLE, PM_MUSIC, PM_EVENT, PM_ALERT, PM_TIMER, PM_SW, PM_CHARGE, PM_TMUSIC };  // PM_TMUSIC: temporizador con música sonando
 static const CalEvent* upcomingEvent(int* mins) {
     SYSTEMTIME st; GetLocalTime(&st);
     long t = daysFromCivil(st.wYear, st.wMonth, st.wDay); int now = st.wHour * 60 + st.wMinute;
@@ -2161,7 +2161,7 @@ static int pillMode() {
     if (chargeOn) return PM_CHARGE;
     int m = 0; const CalEvent* e = cfg.alerts ? upcomingEvent(&m) : nullptr;
     if (e && m <= 15) return PM_EVENT;
-    if (tmState) return PM_TIMER;
+    if (tmState) return media.has && media.playing && !media.title.empty() ? PM_TMUSIC : PM_TIMER;
     if (swRun) return PM_SW;
     if (media.has && !media.title.empty()) return PM_MUSIC;
     if (e) return PM_EVENT;
@@ -2805,6 +2805,24 @@ static void drawCollapsed(float px, float py, float pw, int mode) {
         col(1, 1, 1, 0.8f); text(e->title, fSmall, px + 82, cy - 9, pw - 82 - 78, 18);
         std::wstring when = mins <= 0 ? L"ahora" : L"en " + std::to_wstring(mins) + L" min";
         colC(e->color); text(when, fSmall, px + pw - 15 - 70, cy - 9, 70, 18, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    } else if (mode == PM_TMUSIC) {  // carátula, hora, título pasando y la cuenta atrás con su anillo a la derecha
+        float ax = px + 6;
+        if (artSBmp) drawBitmapRounded(artSBmp, ax, cy - 11, 22, 6, 1);
+        else { col(0.22f, 0.22f, 0.24f); fillRR(ax, cy - 11, 22, 22, 6); col(1, 1, 1, 0.7f); text(L"♪", fSmall, ax, cy - 11, 22, 22, DWRITE_TEXT_ALIGNMENT_CENTER); }
+        dotText(tm, ax + 30, cy, 2.0f, D2D1_COLOR_F{1, 1, 1, 1});
+        ULONGLONG rem = tmRemaining();
+        float rx = px + pw - 16 - 8;
+        float cl = rx - 14 - counterW(rem >= 3600000);
+        float sl = musicStatusX(tm);
+        drawStatusLeft(px + sl, cy);
+        float rs = cl - 14, tx = px + sl + statusLeftW() + 6, tr = rs - statusRightW() - 12;
+        drawStatusRight(rs, cy);
+        drawMarquee(tx, cy, std::max(0.f, tr - tx));
+        mqGeo = {tx, cy, std::max(0.f, tr - tx), gA}; mqGeoOk = true;
+        float ga = gA; gA *= tmState == 2 ? 0.5f : 1.f;
+        ring(rx, cy, 7.5f, tmDur ? (float)rem / tmDur : 0, timerColor(), 2.4f);
+        dotText(fmtClock(rem, true), rx - 14, cy, 2.0f, timerColor(), 2);
+        gA = ga;
     } else if (mode == PM_MUSIC) {
         float ax = px + 6;
         if (artSBmp) drawBitmapRounded(artSBmp, ax, cy - 11, 22, 6, 1);
@@ -3151,13 +3169,32 @@ static void drawCtx(float dW, float barTop) {
 }
 static void dockAppsChanged();
 static void dockRefreshSoon(UINT ms);
+// "Abrir nueva ventana": si la app ya estaba abierta (Terminal, navegadores...), la ventana nueva la crea
+// su propio proceso y Windows la deja detrás. Se apuntan las ventanas de antes y la nueva se trae delante.
+static const UINT DT_NEWWIN = 6;
+static std::set<HWND> nwBefore; static ULONGLONG nwUntil = 0;
+static void launchNewWindow(const Tile& t) {
+    std::wstring args, tg = tileLaunchTarget(t, &args);
+    std::vector<HWND> ws; EnumWindows(enumTaskWin, (LPARAM)&ws);
+    nwBefore = std::set<HWND>(ws.begin(), ws.end()); nwUntil = GetTickCount64() + 6000;
+    AllowSetForegroundWindow(ASFW_ANY);
+    ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
+    if (dockHwnd) SetTimer(dockHwnd, DT_NEWWIN, 120, nullptr);
+}
+static void newWindowTick() {
+    std::vector<HWND> ws; EnumWindows(enumTaskWin, (LPARAM)&ws);
+    for (HWND w : ws) if (!nwBefore.count(w)) {  // EnumWindows va de delante a atrás: la primera nueva
+        KillTimer(dockHwnd, DT_NEWWIN); nwBefore.clear();
+        forceForeground(w); return;
+    }
+    if (GetTickCount64() > nwUntil) { KillTimer(dockHwnd, DT_NEWWIN); nwBefore.clear(); }
+}
 static void ctxRun(int item) {
     if (ctxTile < 0 || ctxTile >= (int)tiles.size() || item < 0 || item >= (int)ctxActs.size()) { ctxTile = -1; return; }
     Tile t = tiles[ctxTile]; int act = ctxActs[item];
     ctxTile = -1;
     if (act == CA_NEW) {
-        std::wstring args, tg = tileLaunchTarget(t, &args);
-        ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
+        launchNewWindow(t); dockRefreshSoon(1500);
     } else if (act == CA_PIN) {
         appendAtajo(tileName(t), tileLaunchTarget(t, nullptr)); dockAppsChanged();
     } else if (act == CA_UNPIN) {
@@ -3970,7 +4007,7 @@ static void startAnim() {
 }
 static bool eqActive() { return visible && cfg.eq && !expanded && media.playing && pillMode() == PM_MUSIC; }
 // la marquesina solo se mueve con la píldora a la vista (no en la rayita) y con música sonando
-static bool marqueeActive() { return visible && !expanded && media.playing && pillMode() == PM_MUSIC && sh.t >= CH - 1 && !media.title.empty(); }
+static bool marqueeActive() { return visible && !expanded && media.playing && (pillMode() == PM_MUSIC || pillMode() == PM_TMUSIC) && sh.t >= CH - 1 && !media.title.empty(); }
 static int wantTick() {
     if (alertOn) return 33;
     if (!visible) return tmState == 1 ? 250 : 0;
@@ -4189,6 +4226,7 @@ static void collapsedTargets() {
     if (mode == PM_TIMER) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(tmRemaining() >= 3600000) + 38);
     else if (mode == PM_SW) w = std::max(CW_IDLE, left + statusRightW() + 16 + counterW(swElapsed() >= 3600000) + 36);
     else if (mode == PM_MUSIC) w = musicStatusX(hhmmNow()) + statusLeftW() + 6 + 170 + 12 + statusRightW() + 12 + 33;
+    else if (mode == PM_TMUSIC) w = musicStatusX(hhmmNow()) + statusLeftW() + 6 + 140 + 12 + statusRightW() + 14 + counterW(tmRemaining() >= 3600000) + 38;
     if (hovered) { w += 10; h += 3; }
     sw.t = w; sh.t = h; sr.t = h / 2;
 }
@@ -4852,6 +4890,7 @@ static LRESULT CALLBACK DockProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == DT_COVER) { KillTimer(h, DT_COVER); dockCheckCover(); }
         else if (wp == DT_HIDE) { KillTimer(h, DT_HIDE); dockUpdateShown(); }
         else if (wp == DT_PREVIEW) { KillTimer(h, DT_PREVIEW); dockPreviewUpdate(false); }
+        else if (wp == DT_NEWWIN) newWindowTick();
         else if (wp == DT_PREVHIDE) {
             KillTimer(h, DT_PREVHIDE);
             if (!prevMouseIn) { dockPreviewUpdate(true); if (dCovered && !dMouseIn && !dockPopup()) SetTimer(h, DT_HIDE, 300, nullptr); }
@@ -4913,8 +4952,7 @@ static LRESULT CALLBACK DockProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int id; { DockCtx c; id = hitAt(lp); }
         int i = id - D_ITEM;
         if (i >= 0 && i < (int)dItems.size() && dItems[i].tile >= 0) {
-            std::wstring args, tg = tileLaunchTarget(tiles[dItems[i].tile], &args);
-            ShellExecuteW(nullptr, L"open", tg.c_str(), args.empty() ? nullptr : args.c_str(), nullptr, SW_SHOWNORMAL);
+            launchNewWindow(tiles[dItems[i].tile]);
             dockStartBounce(i, 1); dockRefreshSoon(1500);
         }
         return 0;

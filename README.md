@@ -16,7 +16,7 @@ Está hecha en C++ nativo (Win32 + Direct2D), sin Electron ni .NET, para que con
 
 - Si suena música: carátula, ecualizador con el color de la carátula y el título seguido del artista pasando en bucle con letras de puntitos (como la tipografía del Nothing Phone), sin quitar la hora, el wifi, el volumen, la fecha ni la batería. Al cambiar de canción los puntitos se van encendiendo; en pausa se para. Se desliza de píxel en píxel y en cada paso solo se repinta la franja del texto; solo se mueve con la píldora a la vista.
 - Si tienes un evento pronto: "Clase en 20 min".
-- Con el temporizador en marcha: la cuenta atrás con un anillo de progreso, también junto al resto de la información.
+- Con el temporizador en marcha: la cuenta atrás con un anillo de progreso, también junto al resto de la información. Si además suena música, salen las dos cosas: la carátula y el título pasando a la izquierda y la cuenta atrás a la derecha.
 - Al enchufar el cargador: un rayo animado y la batería llenándose hasta el porcentaje real. Mientras está enchufado sale un rayito al lado de la batería.
 - Si la ventana que estás usando queda debajo de la isla (por ejemplo, maximizada), se encoge a una rayita fina para no tapar nada. Al pasar el ratón por arriba vuelve.
 - Mantén **Ctrl** con el ratón encima para que casi desaparezca y deje pasar los clics a lo que hay debajo.

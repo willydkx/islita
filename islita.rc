@@ -2,6 +2,7 @@
 #include <winver.h>
 
 1 ICON "assets/islita.ico"
+1 24 "islita.manifest"  // RT_MANIFEST: Segment Heap (devuelve mejor la memoria libre)
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,4,0,0

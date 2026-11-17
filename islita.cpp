@@ -81,7 +81,7 @@ struct StatsInfo { float cpuT = -1, gpuT = -1, cpuU = -1, gpuU = -1, ram = -1; }
 static std::mutex gMx;
 static MediaInfo gMediaShared;
 static StatsInfo gStatsShared;
-static std::atomic<bool> gExpandedA{false}, gQuit{false}, gVisibleA{true}, gPollSoon{false};
+static std::atomic<bool> gExpandedA{false}, gQuit{false}, gVisibleA{true}, gPollSoon{false}, gSleepA{false};  // gSleepA: reposo en pantalla completa
 static HANDLE gWake;
 static HWND gHwnd, dockHwnd;  // la isla y el dock
 static void freeMarquee();
@@ -259,8 +259,11 @@ static void pollMedia() {
                         }
                         rel(ref);
                     }
-                    // a veces la carátula llega un poco después que el título: reintentar en la siguiente vuelta
-                    if (!mi.art.empty() || mi.title.empty()) lastKey = key;
+                    // a veces la carátula llega un poco después que el título: reintentar en las siguientes vueltas,
+                    // pero solo 3 veces (un vídeo sin carátula no debe abrir y decodificar la imagen cada segundo)
+                    static std::wstring triedKey; static int tries = 0;
+                    if (key != triedKey) { triedKey = key; tries = 0; }
+                    if (!mi.art.empty() || mi.title.empty() || ++tries >= 3) lastKey = key;
                 }
                 rel(props);
             }
@@ -667,7 +670,7 @@ static void run() {
         // cada cuánto mirar la música: más a menudo solo si está sonando algo
         DWORD wait;
         { std::lock_guard<std::mutex> lk(gMx); wait = !gMediaShared.has ? 6000 : (gMediaShared.playing ? 2000 : 4000); }
-        if (exp) wait = 1000; else if (!vis) wait = 10000;
+        if (exp) wait = 1000; else if (gSleepA) wait = INFINITE; else if (!vis) wait = 10000;  // en reposo, hasta que la despierten
         WaitForSingleObject(gWake, wait);
     }
     closeSensors();
@@ -4246,9 +4249,11 @@ static void setExpanded(bool e, int v = -1) {
 }
 
 // ---------------------------------------------------------------- pantalla completa
+static bool isStartMenu(HWND h);
 static bool foregroundIsFullscreen() {
     HWND fg = GetForegroundWindow();
     if (!fg || fg == GetDesktopWindow() || fg == GetShellWindow() || fg == gHwnd) return false;
+    if (isStartMenu(fg)) return false;  // tecla Windows: despierta a islita aunque el menú ocupe toda la pantalla
     wchar_t cls[64]; GetClassNameW(fg, cls, 64);
     if (!wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Progman") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
     // maximizada (con borde para redimensionar) no es pantalla completa, aunque sin barra de tareas ocupe todo
@@ -4273,13 +4278,33 @@ static void updateDiscreet() {
     discreet = d;
     if (!expanded) { collapsedTargets(); startAnim(); }
 }
+// reposo en pantalla completa (juegos, vídeos): sin comprobaciones periódicas ni hilo de fondo; se despierta sola en
+// cuanto cambia la ventana activa (tecla Windows, Alt+Tab, salir del juego) gracias al aviso de primer plano
+static bool sleeping = false;
+static void scheduleClock(); static void dockWatch(HWND fg);
+static void enterSleep() {
+    if (sleeping) return;
+    sleeping = true; gSleepA = true;
+    KillTimer(gHwnd, T_CLOCK); KillTimer(gHwnd, T_TRIM);
+    SetCoalescableTimer(gHwnd, T_POLL, 10000, nullptr, 3000);  // por si el juego sale de pantalla completa sin cambiar de ventana
+    dockWatch(nullptr);  // deja de vigilar los movimientos de la ventana del juego
+    freeMarquee(); freeSearchIcons(); trayList.clear(); freeTrayBmps(); SafeRelease(cacheRT); cacheValid = false;
+    trimMemory();
+}
+static void exitSleep() {
+    if (!sleeping) return;
+    sleeping = false; gSleepA = false;
+    SetCoalescableTimer(gHwnd, T_POLL, 1500, nullptr, 600);
+    scheduleClock();
+    SetEvent(gWake);
+}
 static void checkFullscreen() {
     updateDiscreet();
     bool hide = cfg.hideFull && !alertOn && foregroundIsFullscreen();
     if (hide == !visible) return;
     visible = !hide; gVisibleA = visible;
-    if (hide) { setExpanded(false); ShowWindow(gHwnd, SW_HIDE); }
-    else { ShowWindow(gHwnd, SW_SHOWNOACTIVATE); render(); SetEvent(gWake); }
+    if (hide) { setExpanded(false); ShowWindow(gHwnd, SW_HIDE); enterSleep(); }
+    else { exitSleep(); ShowWindow(gHwnd, SW_SHOWNOACTIVATE); render(); SetEvent(gWake); }
 }
 static RECT pillScreenRect() {
     RECT r; GetWindowRect(gHwnd, &r);
@@ -4483,6 +4508,7 @@ static void CALLBACK dockLocEvent(HWINEVENTHOOK, DWORD, HWND h, LONG obj, LONG c
     if (h && h == dWatchFg && obj == OBJID_WINDOW && child == CHILDID_SELF) SetTimer(dockHwnd, DT_COVER, 40, nullptr);
 }
 static void dockWatch(HWND fg) {
+    if (sleeping) fg = nullptr;
     dWatchFg = fg;
     DWORD pid = 0; if (fg) GetWindowThreadProcessId(fg, &pid);
     if (pid == dLocPid) return;
@@ -4964,7 +4990,7 @@ static void finishTimer() {
         tmState = 0; tmLeft = tmDur;
         PlaySoundW(L"C:\\Windows\\Media\\Alarm01.wav", nullptr, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
     }
-    if (!visible) { visible = true; gVisibleA = true; ShowWindow(gHwnd, SW_SHOWNOACTIVATE); }
+    if (!visible) { exitSleep(); visible = true; gVisibleA = true; ShowWindow(gHwnd, SW_SHOWNOACTIVATE); }
     if (!expanded) { collapsedTargets(); sw.v += 700; startAnim(); }  // saltito
 }
 static void dismissAlert() {
